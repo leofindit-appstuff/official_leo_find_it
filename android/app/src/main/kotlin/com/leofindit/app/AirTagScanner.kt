@@ -1,4 +1,4 @@
-package com.example.leo_find_it
+package com.leofindit.app
 
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
@@ -7,7 +7,6 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.ParcelUuid
-import android.os.SystemClock
 import android.util.Log
 import java.security.MessageDigest
 import kotlin.math.pow
@@ -28,11 +27,12 @@ class AirTagScanner(
         private const val TAG = "AirTagScanner"
 
         private const val APPLE_MFG_ID = 0x004C
-
+        //Identify Apple Find My / AirTag BLE packets
         private val FIND_MY_UUID =
             ParcelUuid.fromString("0000FD44-0000-1000-8000-00805F9B34FB")
-
+        //Correlate rotating tracker identifiers
         private const val STABLE_PREFIX_LEN = 4
+        //Expire trackers after 20 seconds
         private const val TRACKER_TTL_MS = 20_000L
     }
 

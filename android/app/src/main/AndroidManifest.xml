@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.example.leo_find_it">
+    package="com.leofindit.app">
 
     <!-- Location permissions (required for BLE scan delivery on many devices) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -23,7 +23,7 @@
         android:required="false" />
 
     <application
-        android:label="leo_find_it_new"
+        android:label="leo_find_it"
         android:icon="@mipmap/leo_splash">
 
         <meta-data

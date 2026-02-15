@@ -1,4 +1,4 @@
-package com.example.leo_find_it
+package com.leofindit.app
 
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager

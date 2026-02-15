@@ -8,6 +8,11 @@ import 'ble_bridge.dart';
 import 'models.dart';
 import 'distance_page.dart';
 import 'identification_page.dart';
+import 'device_marks.dart';
+
+import 'app_drawer.dart';
+import 'filters.dart';
+import 'reports_store.dart';
 
 void main() {
   runApp(const LeoTrackerApp());
@@ -27,6 +32,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
   bool scanning = false;
   int pageIndex = 0;
   DateTime? lastScanTime;
+  DateTime? scanStartTime;
 
   StreamSubscription<TrackerDevice>? _bleSub;
   StreamSubscription<AccelerometerEvent>? _motionSub;
@@ -37,9 +43,16 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
   late AnimationController _fadeCtrl;
   late Animation<double> _fadeAnim;
 
+  // Stable-ish display order to reduce jumping
+  List<String> _displayOrder = [];
+  Timer? _orderTimer;
+
   @override
   void initState() {
     super.initState();
+
+    // Load saved reports (safe if file doesn't exist yet)
+    ReportsStore.init();
 
     _fadeCtrl = AnimationController(
       vsync: this,
@@ -58,15 +71,79 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
         final prev = _devicesBySig[device.signature];
         _devicesBySig[device.signature] =
         prev == null ? device : prev.merge(device);
+
+        // If new device, push it to the top of the display order.
+        if (prev == null) {
+          // New trackers start as Unknown so Identify can organize them.
+          if (DeviceMarks.get(device.signature) == null) {
+            DeviceMarks.set(device.signature, DeviceMark.unknown);
+          }
+
+          _displayOrder = [
+            device.signature,
+            ..._displayOrder.where((s) => s != device.signature),
+          ];
+        }
+      });
+    });
+
+    // Resort at a slow cadence only (prevents UI from constantly jumping)
+    _orderTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
+      if (!mounted) return;
+
+      // Only maintain recent ordering when that's the selected mode
+      if (FiltersModel.state.sortMode != SortMode.recent) return;
+
+      setState(() {
+        _rebuildRecentOrder();
       });
     });
   }
 
-  // Stable ordering by first seen ms instead of last seen ms
-  // This prevents cards from jumping as RSSI/distance updates.
-  List<TrackerDevice> get devices =>
-      _devicesBySig.values.toList()
-        ..sort((a, b) => a.firstSeenMs.compareTo(b.firstSeenMs));
+  void _rebuildRecentOrder() {
+    if (_devicesBySig.isEmpty) {
+      _displayOrder = [];
+      return;
+    }
+
+    final sigs = _devicesBySig.keys.toList();
+
+    sigs.sort((a, b) {
+      final da = _devicesBySig[a]!;
+      final db = _devicesBySig[b]!;
+      final c = db.lastSeenMs.compareTo(da.lastSeenMs); // recent first
+      if (c != 0) return c;
+
+      // tie-breaker: preserve existing order if possible
+      final ia = _displayOrder.indexOf(a);
+      final ib = _displayOrder.indexOf(b);
+      if (ia == -1 && ib == -1) return 0;
+      if (ia == -1) return 1;
+      if (ib == -1) return -1;
+      return ia.compareTo(ib);
+    });
+
+    _displayOrder = sigs;
+  }
+
+  // Devices list depends on filter sort mode.
+  List<TrackerDevice> get devices {
+    final mode = FiltersModel.state.sortMode;
+
+    if (mode == SortMode.distanceAsc) {
+      final list = _devicesBySig.values.toList()
+        ..sort((a, b) => a.distanceMeters.compareTo(b.distanceMeters));
+      return list;
+    }
+
+    // default = recent ordering (stable-ish)
+    if (_displayOrder.isEmpty) _rebuildRecentOrder();
+
+    return _displayOrder
+        .where(_devicesBySig.containsKey)
+        .map((sig) => _devicesBySig[sig]!)
+        .toList();
+  }
 
   Future<void> toggleScan() async {
     if (scanning) {
@@ -77,6 +154,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       setState(() {
         scanning = false;
         lastScanTime = DateTime.now();
+        scanStartTime = null;
       });
     } else {
       await BleBridge.startScan();
@@ -84,6 +162,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
 
       setState(() {
         scanning = true;
+        scanStartTime = DateTime.now();
       });
     }
   }
@@ -93,9 +172,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       if (!scanning) return;
 
       final magnitude = sqrt(
-        event.x * event.x +
-            event.y * event.y +
-            event.z * event.z,
+        event.x * event.x + event.y * event.y + event.z * event.z,
       );
 
       final delta = (magnitude - _lastMag).abs();
@@ -109,6 +186,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
 
   @override
   void dispose() {
+    _orderTimer?.cancel();
     _fadeCtrl.dispose();
     _motionSub?.cancel();
     _bleSub?.cancel();
@@ -117,8 +195,9 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
 
   @override
   Widget build(BuildContext context) {
-    final trackedDevices =
-    devices.where((d) => d.isLikelyAirTag || d.isLikelyTile).toList();
+    final trackedDevices = devices
+        .where((d) => d.isLikelyAirTag || d.isLikelyTile || d.isLikelySamsung)
+        .toList();
 
     final pages = [
       DistancePage(
@@ -126,6 +205,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
         scanning: scanning,
         onRescan: toggleScan,
         lastScanTime: lastScanTime,
+        scanStartTime: scanStartTime,
       ),
       IdentificationPage(devices: trackedDevices),
     ];
@@ -135,13 +215,11 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       home: FadeTransition(
         opacity: _fadeAnim,
         child: Scaffold(
+          drawer: const AppDrawer(),
           appBar: AppBar(
             centerTitle: true,
             title: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 6,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
                 color: Colors.black,
                 borderRadius: BorderRadius.circular(999),

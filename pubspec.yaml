@@ -1,4 +1,4 @@
-name: leo_find_it_new
+name: leo_find_it
 description: A BLE tracker scanner
 publish_to: "none"
 version: 1.0.0+1
@@ -14,6 +14,8 @@ dependencies:
   sensors_plus: ^5.0.0
   intl: ^0.18.1
   google_fonts: ^6.3.2
+  path_provider: ^2.1.2
+  share_plus: ^9.0.0
 
 flutter:
   uses-material-design: true
