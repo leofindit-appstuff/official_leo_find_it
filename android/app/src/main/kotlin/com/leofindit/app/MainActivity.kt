@@ -28,13 +28,13 @@ class MainActivity : FlutterActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var airTagScanner: AirTagScanner? = null
-    private var nonAppleScanner: NonAppleTrackerScanner? = null
+    private var tileTagScanner: TileTagScanner? = null
+    private var samsungTagScanner: SamsungTagScanner? = null
     private var scanChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // ===== Scanner channel (unchanged) =====
         scanChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SCAN_CHANNEL)
         scanChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
@@ -68,7 +68,6 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        // Storage channel
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, STORAGE_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -106,25 +105,31 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun initScannersIfNeeded() {
-        if (airTagScanner != null && nonAppleScanner != null) return
+        if (airTagScanner != null && tileTagScanner != null && samsungTagScanner != null) return
 
         airTagScanner = AirTagScanner(this) { tracker ->
             sendToFlutter(tracker)
         }
 
-        nonAppleScanner = NonAppleTrackerScanner(this) { tracker ->
+        tileTagScanner = TileTagScanner(this) { tracker ->
+            sendToFlutter(tracker)
+        }
+
+        samsungTagScanner = SamsungTagScanner(this) { tracker ->
             sendToFlutter(tracker)
         }
     }
 
     private fun startScanners() {
         airTagScanner?.start()
-        nonAppleScanner?.start()
+        tileTagScanner?.start()
+        samsungTagScanner?.start()
     }
 
     private fun stopScanners() {
         airTagScanner?.stop()
-        nonAppleScanner?.stop()
+        tileTagScanner?.stop()
+        samsungTagScanner?.stop()
     }
 
     private fun hasBlePermissions(): Boolean {
@@ -167,7 +172,10 @@ class MainActivity : FlutterActivity() {
 
         if (requestCode != PERMISSION_REQUEST) return
 
-        val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        val granted = grantResults.isNotEmpty() && grantResults.all {
+            it == PackageManager.PERMISSION_GRANTED
+        }
+
         if (!granted) return
         if (!isLocationEnabled()) return
 
@@ -200,10 +208,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-
-    // Downloads save (MediaStore)
-
-
     private fun saveTextToDownloads(
         fileName: String,
         mimeType: String,
@@ -215,7 +219,6 @@ class MainActivity : FlutterActivity() {
             put(MediaStore.Downloads.DISPLAY_NAME, fileName)
             put(MediaStore.Downloads.MIME_TYPE, mimeType)
 
-            // Put under Downloads/LEOFindIt/
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.Downloads.RELATIVE_PATH, "Download/LEOFindIt")
                 put(MediaStore.Downloads.IS_PENDING, 1)
@@ -233,7 +236,10 @@ class MainActivity : FlutterActivity() {
             out.write(content.toByteArray(Charsets.UTF_8))
             out.flush()
         } finally {
-            try { out?.close() } catch (_: Exception) {}
+            try {
+                out?.close()
+            } catch (_: Exception) {
+            }
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
