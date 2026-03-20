@@ -1,15 +1,23 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
+
 import 'device_marks.dart';
 import 'models.dart';
 import 'ble_bridge.dart';
 import 'reports_store.dart';
+import 'app_tutorial.dart';
 
 class SearchPage extends StatefulWidget {
   final TrackerDevice device;
+  final bool tutorialMode;
 
-  const SearchPage({required this.device, super.key});
+  const SearchPage({
+    required this.device,
+    this.tutorialMode = false,
+    super.key,
+  });
 
   @override
   State<SearchPage> createState() => _SearchPageState();
@@ -22,12 +30,10 @@ class _SearchPageState extends State<SearchPage>
   TrackerDevice? live;
   StreamSubscription<TrackerDevice>? sub;
 
-  // UI decoupling
   Timer? _uiTimer;
   TrackerDevice? _pending;
   static const int _uiFrameMs = 60;
 
-  // FOUND logic (meters)
   static const double _foundThresholdM = 0.10;
   static const double _foundReleaseM = 0.35;
   static const int _foundHoldMs = 1800;
@@ -35,10 +41,8 @@ class _SearchPageState extends State<SearchPage>
   int? _foundAtMs;
   bool _hapticFired = false;
 
-  // Display distance meters internally
   double? _displayDistanceM;
 
-  // Direction smoothing (Apple-like)
   double? _dirRssi;
   double _rssiVelocity = 0.0;
   int _lastDirChangeMs = 0;
@@ -57,14 +61,22 @@ class _SearchPageState extends State<SearchPage>
   Timer? _ageTick;
   int _nowMs = DateTime.now().millisecondsSinceEpoch;
 
+  final GlobalKey _distanceInfoKey = GlobalKey();
+  final GlobalKey _signalStrengthKey = GlobalKey();
+  final GlobalKey _categoryTabsKey = GlobalKey();
+
   @override
   void initState() {
     super.initState();
     live = widget.device;
 
-    // Ensure every tracker has a mark; everything starts Unknown by default.
     if (DeviceMarks.get(widget.device.signature) == null) {
-      DeviceMarks.set(widget.device.signature, DeviceMark.unknown);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (DeviceMarks.get(widget.device.signature) == null) {
+          DeviceMarks.set(widget.device.signature, DeviceMark.unknown);
+        }
+      });
     }
 
     _pulseCtrl = AnimationController(
@@ -76,23 +88,90 @@ class _SearchPageState extends State<SearchPage>
         .chain(CurveTween(curve: Curves.easeInOut))
         .animate(_pulseCtrl);
 
-    sub = BleBridge.detections.listen((d) {
-      if (d.signature != widget.device.signature) return;
-      _pending = d;
-    });
-
-    _uiTimer = Timer.periodic(const Duration(milliseconds: _uiFrameMs), (_) {
-      if (!mounted || _pending == null) return;
-      setState(() {
-        _updateState(_pending!);
-        live = _pending;
+    if (!widget.tutorialMode) {
+      sub = BleBridge.detections.listen((d) {
+        if (d.signature != widget.device.signature) return;
+        _pending = d;
       });
-    });
+
+      _uiTimer = Timer.periodic(const Duration(milliseconds: _uiFrameMs), (_) {
+        if (!mounted || _pending == null) return;
+        setState(() {
+          _updateState(_pending!);
+          live = _pending;
+        });
+      });
+    } else {
+      _displayDistanceM = widget.device.distanceUiM;
+      _updateState(widget.device);
+    }
 
     _ageTick = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (!mounted) return;
       setState(() => _nowMs = DateTime.now().millisecondsSinceEpoch);
     });
+
+    if (widget.tutorialMode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await Future.delayed(const Duration(milliseconds: 900));
+        if (!mounted) return;
+        await _runTutorial();
+      });
+    }
+  }
+
+  Future<bool> _showCoach(List<TargetFocus> targets) async {
+    if (!mounted || targets.isEmpty) return false;
+
+    final completer = Completer<bool>();
+
+    final coach = TutorialCoachMark(
+      targets: targets,
+      colorShadow: Colors.black,
+      opacityShadow: 0.78,
+      paddingFocus: 10,
+      hideSkip: true,
+      onFinish: () {
+        if (!completer.isCompleted) completer.complete(true);
+      },
+      onSkip: () {
+        if (!completer.isCompleted) completer.complete(false);
+        return true;
+      },
+    );
+
+    await Future.delayed(const Duration(milliseconds: 100));
+    coach.show(context: context);
+    return completer.future;
+  }
+
+  Future<void> _runTutorial() async {
+    await _showCoach([
+      tutorialTarget(
+        key: _distanceInfoKey,
+        id: 'search_distance',
+        title: 'Distance and signal',
+        body: 'Tracker distance and signal strengths are displayed here.',
+      ),
+      tutorialTarget(
+        key: _signalStrengthKey,
+        id: 'search_signal_colors',
+        title: 'Signal strength colors',
+        body: 'Grey, yellow, and green show strength from weakest to strongest.',
+      ),
+      tutorialTarget(
+        key: _categoryTabsKey,
+        id: 'search_categories',
+        title: 'Tracker categories',
+        body:
+        'You can put a tracker in three categories: Friendly, Unknown, and Suspect. If you use Suspect, it will create a report.',
+        align: ContentAlign.top,
+      ),
+    ]);
+
+    if (mounted) {
+      Navigator.pop(context);
+    }
   }
 
   bool _isFound(TrackerDevice d) {
@@ -155,18 +234,15 @@ class _SearchPageState extends State<SearchPage>
   void _updateState(TrackerDevice d) {
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    // Use SMOOTHED device distance as input (prevents huge spikes)
     final rawDist = d.distanceUiM;
 
-    // Additional tiny UI smoothing (just for display)
     _displayDistanceM ??= rawDist;
     _displayDistanceM = (_displayDistanceM! * 0.90) + (rawDist * 0.10);
 
-    // FOUND logic
     if (_isFound(d)) {
       _foundAtMs ??= now;
 
-      if (!_hapticFired) {
+      if (!_hapticFired && !widget.tutorialMode) {
         HapticFeedback.lightImpact();
         _hapticFired = true;
       }
@@ -196,7 +272,6 @@ class _SearchPageState extends State<SearchPage>
       _pulseCtrl.reset();
     }
 
-    // Direction logic (Apple-like smoothing)
     final rawRssi = d.rssi.toDouble();
     _dirRssi ??= rawRssi;
 
@@ -231,9 +306,10 @@ class _SearchPageState extends State<SearchPage>
       DeviceMarks.set(d.signature, mark);
     });
 
-    // Create report when marking as Suspect + SHOW POPUP
     if (mark == DeviceMark.suspect) {
-      await ReportsStore.createFromDevice(d);
+      if (!widget.tutorialMode) {
+        await ReportsStore.createFromDevice(d);
+      }
 
       if (!mounted) return;
 
@@ -242,7 +318,9 @@ class _SearchPageState extends State<SearchPage>
         ..showSnackBar(
           SnackBar(
             content: Text(
-              'Report created for ${d.displayName}',
+              widget.tutorialMode
+                  ? 'Suspect would create a report here.'
+                  : 'Report created for ${d.displayName}',
               style: const TextStyle(
                 fontFamily: 'Inter',
                 fontWeight: FontWeight.w600,
@@ -271,7 +349,6 @@ class _SearchPageState extends State<SearchPage>
     final band = _bandFromRssi(d.smoothedRssi);
     final color = _bandColor(band);
 
-    // Always treat null as Unknown
     final mark = DeviceMarks.get(d.signature) ?? DeviceMark.unknown;
 
     return Scaffold(
@@ -317,17 +394,28 @@ class _SearchPageState extends State<SearchPage>
               ),
             ),
             const SizedBox(height: 8),
-            Text(
-              _feetLabel(_displayDistanceM ?? d.distanceUiM),
-              style: TextStyle(
-                fontFamily: 'Inter',
-                fontSize: 26,
-                fontWeight: FontWeight.w800,
-                color: color,
-              ),
+            Column(
+              key: _distanceInfoKey,
+              children: [
+                Text(
+                  _feetLabel(_displayDistanceM ?? d.distanceUiM),
+                  style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 26,
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  "RSSI: ${d.rssi} dBm • Seen ${_ageLabel(d.lastSeenMs)}",
+                  style: const TextStyle(fontFamily: 'Inter'),
+                ),
+              ],
             ),
             const SizedBox(height: 8),
             Container(
+              key: _signalStrengthKey,
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
@@ -345,18 +433,12 @@ class _SearchPageState extends State<SearchPage>
             ),
             const SizedBox(height: 14),
             Text(
-              "RSSI: ${d.rssi} dBm • Seen ${_ageLabel(d.lastSeenMs)}",
-              style: const TextStyle(fontFamily: 'Inter'),
-            ),
-            const SizedBox(height: 8),
-            Text(
               'MAC: ${d.displayMac}',
               style: const TextStyle(fontFamily: 'Inter'),
             ),
             const SizedBox(height: 18),
-
-            // 3-way pill tab control
             Padding(
+              key: _categoryTabsKey,
               padding: const EdgeInsets.symmetric(horizontal: 18),
               child: _MarkTabs(
                 selected: mark,
@@ -377,8 +459,8 @@ class _MarkTabs extends StatelessWidget {
   const _MarkTabs({required this.selected, required this.onSelect});
 
   static const Color _friendly = Color(0xFF2E7D32);
-  static const Color _suspect = Color(0xFFD9534F); // softer red
-  static const Color _unknown = Color(0xFF7A7A7A); // gray
+  static const Color _suspect = Color(0xFFD9534F);
+  static const Color _unknown = Color(0xFF7A7A7A);
 
   @override
   Widget build(BuildContext context) {

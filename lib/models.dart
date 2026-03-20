@@ -65,7 +65,7 @@ class TrackerDevice {
     required this.status,
   });
 
-  /// Stable key used to dedupe across scan restarts / MAC rotation
+  // Stable key used to dedupe across scan restarts / MAC rotation
   String get stableKey {
     if (logicalId.isNotEmpty) return logicalId;
     if (id.isNotEmpty) return id;
@@ -75,7 +75,7 @@ class TrackerDevice {
   // Keep meters as internal unit for logic.
   double get distanceM => distanceMeters;
 
-  // UI uses smoothed distance to reduce scary jumps.
+  // UI uses smoothed distance to reduce big jumps.
   double get distanceUiM => smoothedDistanceMeters;
 
   // Convenience: feet for UI.

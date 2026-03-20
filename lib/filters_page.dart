@@ -83,7 +83,7 @@ class FiltersPage extends StatelessWidget {
   }
 }
 
-// ---------- UI components ----------
+// UI components
 
 class _SectionTitle extends StatelessWidget {
   final String text;

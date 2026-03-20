@@ -7,8 +7,13 @@ import 'search_page.dart';
 
 class IdentificationPage extends StatelessWidget {
   final List<TrackerDevice> devices;
+  final GlobalKey? identifyTabsKey;
 
-  const IdentificationPage({required this.devices, super.key});
+  const IdentificationPage({
+    required this.devices,
+    this.identifyTabsKey,
+    super.key,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -48,6 +53,7 @@ class IdentificationPage extends StatelessWidget {
           child: Column(
             children: [
               Padding(
+                key: identifyTabsKey,
                 padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
                 child: _MarkTabs(),
               ),
@@ -188,8 +194,8 @@ class _MarkTabs extends StatelessWidget {
     final bg = Colors.grey.shade100;
 
     return Container(
-      height: 46,
-      padding: const EdgeInsets.all(4),
+      height: 60,
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(999),
@@ -269,7 +275,6 @@ Color _markColor(DeviceMark? mark) {
       return const Color(0xFF7A7A7A);
   }
 }
-
 
 // Using google icons for icons here:
 // https://fonts.google.com/icons?selected=Material+Symbols+Outlined:stacks:FILL@0;wght@400;GRAD@0;opsz@24&icon.size=24&icon.color=%23e3e3e3

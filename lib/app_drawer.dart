@@ -4,7 +4,14 @@ import 'filters_page.dart';
 import 'reports_page.dart';
 
 class AppDrawer extends StatelessWidget {
-  const AppDrawer({super.key});
+  final GlobalKey? filtersTileKey;
+  final GlobalKey? reportsTileKey;
+
+  const AppDrawer({
+    super.key,
+    this.filtersTileKey,
+    this.reportsTileKey,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -20,6 +27,7 @@ class AppDrawer extends StatelessWidget {
               ),
             ),
             ListTile(
+              key: filtersTileKey,
               leading: const Icon(Icons.tune),
               title: const Text("Filters"),
               onTap: () {
@@ -31,6 +39,7 @@ class AppDrawer extends StatelessWidget {
               },
             ),
             ListTile(
+              key: reportsTileKey,
               leading: const Icon(Icons.description_outlined),
               title: const Text("Reports"),
               onTap: () {

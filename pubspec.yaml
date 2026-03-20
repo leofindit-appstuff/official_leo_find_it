@@ -16,6 +16,8 @@ dependencies:
   google_fonts: ^6.3.2
   path_provider: ^2.1.2
   share_plus: ^9.0.0
+  tutorial_coach_mark: ^1.2.11
+  shared_preferences: ^2.2.3
 
 flutter:
   uses-material-design: true

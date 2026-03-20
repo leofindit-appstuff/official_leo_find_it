@@ -1,8 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
+
 import 'reports_store.dart';
+import 'app_tutorial.dart';
 
 class ReportsPage extends StatefulWidget {
-  const ReportsPage({super.key});
+  final bool tutorialMode;
+
+  const ReportsPage({
+    super.key,
+    this.tutorialMode = false,
+  });
 
   @override
   State<ReportsPage> createState() => _ReportsPageState();
@@ -11,6 +21,59 @@ class ReportsPage extends StatefulWidget {
 class _ReportsPageState extends State<ReportsPage> {
   String? _savedReportId;
   final TextEditingController _feedbackCtrl = TextEditingController();
+
+  final GlobalKey _reportsAreaKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+
+    if (widget.tutorialMode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await Future.delayed(const Duration(milliseconds: 350));
+        await _runTutorial();
+      });
+    }
+  }
+
+  Future<bool> _showCoach(List<TargetFocus> targets) async {
+    if (!mounted || targets.isEmpty) return false;
+
+    final completer = Completer<bool>();
+
+    final coach = TutorialCoachMark(
+      targets: targets,
+      colorShadow: Colors.black,
+      opacityShadow: 0.78,
+      paddingFocus: 10,
+      hideSkip: true,
+      onFinish: () {
+        if (!completer.isCompleted) completer.complete(true);
+      },
+      onSkip: () {
+        if (!completer.isCompleted) completer.complete(false);
+        return true;
+      },
+    );
+
+    coach.show(context: context);
+    return completer.future;
+  }
+
+  Future<void> _runTutorial() async {
+    await _showCoach([
+      tutorialTarget(
+        key: _reportsAreaKey,
+        id: 'reports_area',
+        title: 'Reports',
+        body: 'Suspect tracker reports will show up here and can be saved to your device.',
+      ),
+    ]);
+
+    if (mounted) {
+      Navigator.pop(context);
+    }
+  }
 
   @override
   void dispose() {
@@ -42,7 +105,8 @@ class _ReportsPageState extends State<ReportsPage> {
                   value: deleteFiles,
                   onChanged: (v) => setSt(() => deleteFiles = v ?? false),
                   title: const Text(
-                      "Also delete exported files from Downloads"),
+                    "Also delete exported files from Downloads",
+                  ),
                   controlAffinity: ListTileControlAffinity.leading,
                 ),
               ],
@@ -91,6 +155,7 @@ class _ReportsPageState extends State<ReportsPage> {
             ],
           ),
           body: ListView(
+            key: _reportsAreaKey,
             padding: const EdgeInsets.all(12),
             children: [
               if (reports.isEmpty)
@@ -125,7 +190,8 @@ class _ReportsPageState extends State<ReportsPage> {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
                                   content: Text(
-                                      "Saved Case Report to Downloads/LEOFindIt (.txt)"),
+                                    "Saved Case Report to Downloads/LEOFindIt (.txt)",
+                                  ),
                                 ),
                               );
                             } catch (e) {
@@ -146,7 +212,8 @@ class _ReportsPageState extends State<ReportsPage> {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
                                   content: Text(
-                                      "Saved Raw Evidence to Downloads/LEOFindIt (.json)"),
+                                    "Saved Raw Evidence to Downloads/LEOFindIt (.json)",
+                                  ),
                                 ),
                               );
                             } catch (e) {
@@ -162,7 +229,9 @@ class _ReportsPageState extends State<ReportsPage> {
                             if (!mounted) return;
                             if (_savedReportId == r.reportId) _dismissFeedback();
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text("Report removed from app.")),
+                              const SnackBar(
+                                content: Text("Report removed from app."),
+                              ),
                             );
                           }
 
@@ -175,7 +244,9 @@ class _ReportsPageState extends State<ReportsPage> {
                             if (_savedReportId == r.reportId) _dismissFeedback();
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
-                                content: Text("Report removed (and attempted file delete)."),
+                                content: Text(
+                                  "Report removed (and attempted file delete).",
+                                ),
                               ),
                             );
                           }
@@ -221,7 +292,8 @@ class _ReportsPageState extends State<ReportsPage> {
                   maxLines: 6,
                   decoration: const InputDecoration(
                     border: OutlineInputBorder(),
-                    hintText: "What happened? Any scanner/UI issues? Steps to reproduce?",
+                    hintText:
+                    "What happened? Any scanner/UI issues? Steps to reproduce?",
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -265,4 +337,3 @@ class _ReportsPageState extends State<ReportsPage> {
     );
   }
 }
-
