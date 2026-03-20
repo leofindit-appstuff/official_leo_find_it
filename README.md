@@ -4,13 +4,15 @@ A new Flutter project.
 
 ## Getting Started
 
-This project is a Flutter app with native Android BLE scanning that detects:
+This project collaborative project is a Flutter app with native Android BLE scanning and Iphone BLE scanning that detects:
 
 Apple AirTags / Apple devices
 
 Tile trackers
 
 Samsung SmartTags
+
+For the Android side of things:
 
 Architecture: 
 
