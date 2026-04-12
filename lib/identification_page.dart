@@ -3,9 +3,7 @@ import 'models.dart';
 import 'device_marks.dart';
 import 'search_page.dart';
 
-// This is the page labeled 'identify' in the app...
-
-class IdentificationPage extends StatelessWidget {
+class IdentificationPage extends StatefulWidget {
   final List<TrackerDevice> devices;
   final GlobalKey? identifyTabsKey;
 
@@ -16,65 +14,130 @@ class IdentificationPage extends StatelessWidget {
   });
 
   @override
+  State<IdentificationPage> createState() => _IdentificationPageState();
+}
+
+class _IdentificationPageState extends State<IdentificationPage> {
+  DeviceMark? _selectedFilter;
+
+  static const int _activeWindowMs = 30 * 1000;
+
+  @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<int>(
       valueListenable: DeviceMarks.version,
       builder: (_, __, ___) {
-        // De-dupe by signature (latest snapshot wins)
-        final Map<String, TrackerDevice> unique = {};
-        for (final d in devices) {
-          unique[d.signature] = d;
-        }
-
         final nowMs = DateTime.now().millisecondsSinceEpoch;
-        final qualified = unique.values.where((d) {
-          if (d.distance <= 0) return false;
-          if (nowMs - d.lastSeenMs > 30 * 1000) return false;
-          return true;
-        }).toList();
 
-        final friendly = <TrackerDevice>[];
-        final unknown = <TrackerDevice>[];
-        final suspect = <TrackerDevice>[];
+        final Map<String, TrackerDevice> unique = {};
+        for (final d in widget.devices) {
+          final key = d.stableKey;
+          final prev = unique[key];
 
-        for (final d in qualified) {
-          final mark = DeviceMarks.get(d.signature) ?? DeviceMark.unknown;
-          if (mark == DeviceMark.friendly) {
-            friendly.add(d);
-          } else if (mark == DeviceMark.suspect) {
-            suspect.add(d);
-          } else {
-            unknown.add(d);
+          if (prev == null || d.lastSeenMs > prev.lastSeenMs) {
+            unique[key] = d;
           }
         }
 
-        return DefaultTabController(
-          length: 3,
-          child: Column(
-            children: [
-              Padding(
-                key: identifyTabsKey,
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-                child: _MarkTabs(),
+        final allKnown = unique.values.toList()
+          ..sort((a, b) => b.lastSeenMs.compareTo(a.lastSeenMs));
+
+        final liveUndesignated = allKnown.where((d) {
+          if (DeviceMarks.get(d.stableKey) != DeviceMark.undesignated) {
+            return false;
+          }
+          if (d.distance <= 0) return false;
+          if (nowMs - d.lastSeenMs > _activeWindowMs) return false;
+          return true;
+        }).toList();
+
+        final friendly = allKnown
+            .where((d) => DeviceMarks.get(d.stableKey) == DeviceMark.friendly)
+            .toList();
+
+        final nonsuspect = allKnown
+            .where((d) => DeviceMarks.get(d.stableKey) == DeviceMark.nonsuspect)
+            .toList();
+
+        final suspect = allKnown
+            .where((d) => DeviceMarks.get(d.stableKey) == DeviceMark.suspect)
+            .toList();
+
+        List<TrackerDevice> visible;
+        String emptyText;
+
+        if (_selectedFilter == null) {
+          visible = liveUndesignated;
+          emptyText = 'No undesignated tags yet';
+        } else if (_selectedFilter == DeviceMark.friendly) {
+          visible = friendly;
+          emptyText = 'No friendly tags yet';
+        } else if (_selectedFilter == DeviceMark.nonsuspect) {
+          visible = nonsuspect;
+          emptyText = 'No nonsuspect tags yet';
+        } else if (_selectedFilter == DeviceMark.suspect) {
+          visible = suspect;
+          emptyText = 'No suspect tags yet';
+        } else {
+          visible = liveUndesignated;
+          emptyText = 'No undesignated tags yet';
+        }
+
+        return Column(
+          children: [
+            Padding(
+              key: widget.identifyTabsKey,
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+              child: _MarkTabs(
+                selected: _selectedFilter,
+                onTap: (mark) {
+                  setState(() {
+                    if (_selectedFilter == mark) {
+                      _selectedFilter = null;
+                    } else {
+                      _selectedFilter = mark;
+                    }
+                  });
+                },
               ),
-              Expanded(
-                child: TabBarView(
-                  children: [
-                    _list(context, unknown, empty: 'No unknown trackers yet'),
-                    _list(context, friendly, empty: 'No friendly trackers yet'),
-                    _list(context, suspect, empty: 'No suspect trackers yet'),
-                  ],
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 12),
+              child: Center(
+                child: Text(
+                  _selectedFilter == null
+                      ? 'Showing live undesignated tags'
+                      : 'Showing ${_selectedFilter!.label.toLowerCase()} tags',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: Colors.grey.shade700,
+                  ),
                 ),
               ),
-            ],
-          ),
+            ),
+            Expanded(
+              child: _list(
+                context,
+                visible,
+                empty: emptyText,
+                nowMs: nowMs,
+              ),
+            ),
+          ],
         );
       },
     );
   }
 
-  Widget _list(BuildContext context, List<TrackerDevice> list,
-      {required String empty}) {
+  Widget _list(
+      BuildContext context,
+      List<TrackerDevice> list, {
+        required String empty,
+        required int nowMs,
+      }) {
     if (list.isEmpty) {
       return Center(
         child: Text(
@@ -92,16 +155,8 @@ class IdentificationPage extends StatelessWidget {
     return ListView.builder(
       padding: const EdgeInsets.only(bottom: 14),
       itemCount: list.length,
-      itemBuilder: (_, i) => _deviceCard(context, list[i]),
+      itemBuilder: (_, i) => _deviceCard(context, list[i], nowMs: nowMs),
     );
-  }
-
-  int _bars(int rssi) {
-    if (rssi >= -55) return 5;
-    if (rssi >= -65) return 4;
-    if (rssi >= -75) return 3;
-    if (rssi >= -85) return 2;
-    return 1;
   }
 
   String _ageLabel(int lastSeenMs) {
@@ -113,7 +168,25 @@ class IdentificationPage extends StatelessWidget {
     return "${m}m ${rs}s ago";
   }
 
-  Widget _deviceCard(BuildContext context, TrackerDevice d) {
+  bool _isStale(int lastSeenMs, int nowMs) {
+    return nowMs - lastSeenMs > _activeWindowMs;
+  }
+
+  String _assetForDevice(TrackerDevice d) {
+    if (d.isLikelyAirTag) return 'assets/airtag.png';
+    if (d.isLikelyTile) return 'assets/tile.png';
+    if (d.isLikelyFindMy) return 'assets/findmy.png';
+    if (d.isLikelySamsung) return 'assets/smarttag2.png';
+    return 'assets/leo_splash.png';
+  }
+
+  Widget _deviceCard(
+      BuildContext context,
+      TrackerDevice d, {
+        required int nowMs,
+      }) {
+    final stale = _isStale(d.lastSeenMs, nowMs);
+
     return GestureDetector(
       onTap: () => Navigator.push(
         context,
@@ -125,10 +198,18 @@ class IdentificationPage extends StatelessWidget {
           padding: const EdgeInsets.all(18),
           child: Row(
             children: [
-              Icon(
-                Icons.signal_cellular_alt_rounded,
-                size: 44,
-                color: _markColor(DeviceMarks.get(d.signature)),
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                padding: const EdgeInsets.all(6),
+                child: Image.asset(
+                  _assetForDevice(d),
+                  fit: BoxFit.contain,
+                ),
               ),
               const SizedBox(width: 18),
               Expanded(
@@ -143,6 +224,9 @@ class IdentificationPage extends StatelessWidget {
                         fontSize: 18,
                       ),
                     ),
+                    const SizedBox(height: 4),
+                    Text('UUID: …${d.shortUuid}'),
+                    Text('MAC last 4: ${d.macTail4}'),
                     const SizedBox(height: 6),
                     Text(
                       'Distance: ${d.distanceFt.toStringAsFixed(1)} ft',
@@ -158,19 +242,17 @@ class IdentificationPage extends StatelessWidget {
                         color: Colors.grey.shade700,
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: List.generate(
-                        5,
-                            (i) => Icon(
-                          Icons.signal_cellular_alt,
-                          size: 18,
-                          color: i < _bars(d.smoothedRssi.round())
-                              ? Colors.green
-                              : Colors.grey.shade300,
+                    if (stale) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Stale tag • not currently active',
+                        style: TextStyle(
+                          fontFamily: 'Inter',
+                          fontWeight: FontWeight.w700,
+                          color: Colors.orange.shade700,
                         ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -183,96 +265,92 @@ class IdentificationPage extends StatelessWidget {
 }
 
 class _MarkTabs extends StatelessWidget {
-  const _MarkTabs();
+  final DeviceMark? selected;
+  final ValueChanged<DeviceMark> onTap;
+
+  const _MarkTabs({
+    required this.selected,
+    required this.onTap,
+  });
 
   static const _friendly = Color(0xFF2E7D32);
   static const _suspect = Color(0xFFD9534F);
-  static const _unknown = Color(0xFF7A7A7A);
+  static const _undesignated = Color(0xFF7A7A7A);
+  static const _nonsuspect = Color(0xFF1E88E5);
 
   @override
   Widget build(BuildContext context) {
     final bg = Colors.grey.shade100;
 
     return Container(
-      height: 60,
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: Colors.grey.shade300, width: 1),
       ),
-      child: TabBar(
-        indicatorSize: TabBarIndicatorSize.tab,
-        dividerColor: Colors.transparent,
-        indicator: BoxDecoration(
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          _pill(
+            label: 'Friendly',
+            color: _friendly,
+            mark: DeviceMark.friendly,
+          ),
+          _pill(
+            label: 'Nonsuspect',
+            color: _nonsuspect,
+            mark: DeviceMark.nonsuspect,
+          ),
+          _pill(
+            label: 'Suspect',
+            color: _suspect,
+            mark: DeviceMark.suspect,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pill({
+    required String label,
+    required Color color,
+    required DeviceMark mark,
+  }) {
+    final active = selected == mark;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: () => onTap(mark),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: Colors.grey.shade300, width: 1),
-          boxShadow: [
-            BoxShadow(
-              blurRadius: 10,
-              offset: const Offset(0, 3),
-              color: Colors.black.withOpacity(0.06),
+          border: Border.all(
+            color: active ? color : const Color(0xFFB0B0B0),
+            width: active ? 2 : 1.6,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.circle, size: 10, color: color),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                fontFamily: 'Inter',
+                fontWeight: active ? FontWeight.w800 : FontWeight.w700,
+                color: active ? Colors.black : const Color(0xFF333333),
+              ),
             ),
           ],
         ),
-        labelPadding: EdgeInsets.zero,
-        labelColor: Colors.black,
-        unselectedLabelColor: Colors.grey.shade700,
-        labelStyle: const TextStyle(
-          fontFamily: 'Inter',
-          fontWeight: FontWeight.w700,
-          fontSize: 14,
-          letterSpacing: 0.2,
-        ),
-        unselectedLabelStyle: const TextStyle(
-          fontFamily: 'Inter',
-          fontWeight: FontWeight.w600,
-          fontSize: 14,
-        ),
-        tabs: const [
-          _TabPill(label: 'Unknown', color: _unknown),
-          _TabPill(label: 'Friendly', color: _friendly),
-          _TabPill(label: 'Suspect', color: _suspect),
-        ],
       ),
     );
-  }
-}
-
-class _TabPill extends StatelessWidget {
-  final String label;
-  final Color color;
-
-  const _TabPill({required this.label, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Tab(
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.signal_cellular_alt_rounded,
-            size: 18,
-            color: color,
-          ),
-          const SizedBox(width: 8),
-          Text(label),
-        ],
-      ),
-    );
-  }
-}
-
-Color _markColor(DeviceMark? mark) {
-  switch (mark ?? DeviceMark.unknown) {
-    case DeviceMark.friendly:
-      return const Color(0xFF2E7D32);
-    case DeviceMark.suspect:
-      return const Color(0xFFD9534F);
-    case DeviceMark.unknown:
-      return const Color(0xFF7A7A7A);
   }
 }
 

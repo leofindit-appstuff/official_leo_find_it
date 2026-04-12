@@ -11,12 +11,10 @@ import 'models.dart';
 import 'distance_page.dart';
 import 'identification_page.dart';
 import 'device_marks.dart';
-
 import 'app_drawer.dart';
 import 'filters.dart';
 import 'reports_store.dart';
 import 'search_page.dart';
-import 'reports_page.dart';
 import 'app_tutorial.dart';
 
 void main() {
@@ -31,8 +29,12 @@ class LeoTrackerApp extends StatefulWidget {
 }
 
 class _LeoTrackerAppState extends State<LeoTrackerApp>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   final Map<String, TrackerDevice> _devicesBySig = {};
+  final Map<String, double> _heldPeakRssi = {};
+  final Map<String, int> _heldPeakUntilMs = {};
+
+  static const int _freshPriorityWindowMs = 15 * 1000;
 
   bool scanning = false;
   int pageIndex = 0;
@@ -47,9 +49,8 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
 
   late AnimationController _fadeCtrl;
   late Animation<double> _fadeAnim;
-
-  List<String> _displayOrder = [];
-  Timer? _orderTimer;
+  late AnimationController _liveDotCtrl;
+  late Animation<double> _liveDotAnim;
 
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
@@ -57,17 +58,19 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
   final GlobalKey _trackerListKey = GlobalKey();
   final GlobalKey _firstTrackerCardKey = GlobalKey();
   final GlobalKey _identifyTabsKey = GlobalKey();
-  final GlobalKey _drawerButtonKey = GlobalKey();
   final GlobalKey _drawerFiltersKey = GlobalKey();
   final GlobalKey _drawerReportsKey = GlobalKey();
+  final GlobalKey _drawerQuickStartKey = GlobalKey();
+  final GlobalKey _drawerGuidanceKey = GlobalKey();
+  final GlobalKey _drawerAdvancedKey = GlobalKey();
 
   BuildContext? _materialContext;
-
   bool _tutorialRunning = false;
+  bool _tutorialClosedEarly = false;
+  bool _missionChosenThisLaunch = false;
 
   TrackerDevice get _demoTutorialDevice {
     final now = DateTime.now().millisecondsSinceEpoch;
-    // Pseudo tag for tutorial
     return TrackerDevice(
       signature: 'tutorial-demo-airtag',
       id: 'tutorial-demo-airtag',
@@ -84,7 +87,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       rawFrame: '1EFF4C00121900112233445566778899AABBCC',
       smoothedRssi: -61,
       smoothedDistanceMeters: 1.95,
-      status: DeviceStatus.unknown,
+      status: DeviceStatus.undesignated,
     );
   }
 
@@ -93,6 +96,8 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
     super.initState();
 
     ReportsStore.init();
+    DeviceMarks.init();
+
 
     _fadeCtrl = AnimationController(
       vsync: this,
@@ -104,33 +109,32 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       curve: Curves.easeOut,
     );
 
+    _liveDotCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+
+    _liveDotAnim = Tween<double>(begin: 0.75, end: 1.25).animate(
+      CurvedAnimation(parent: _liveDotCtrl, curve: Curves.easeInOut),
+    );
+
     _fadeCtrl.forward();
 
-    _bleSub = BleBridge.detections.listen((device) {
+    _bleSub = BleBridge.detections.listen((device) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+
+      await DeviceMarks.restoreUndesignated(device.stableKey);
+
       setState(() {
         final prev = _devicesBySig[device.signature];
         _devicesBySig[device.signature] =
         prev == null ? device : prev.merge(device);
 
-        if (prev == null) {
-          if (DeviceMarks.get(device.signature) == null) {
-            DeviceMarks.set(device.signature, DeviceMark.unknown);
-          }
-
-          _displayOrder = [
-            device.signature,
-            ..._displayOrder.where((s) => s != device.signature),
-          ];
-        }
-      });
-    });
-
-    _orderTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
-      if (!mounted) return;
-      if (FiltersModel.state.sortMode != SortMode.recent) return;
-
-      setState(() {
-        _rebuildRecentOrder();
+        _heldPeakRssi[device.signature] = max(
+          _heldPeakRssi[device.signature] ?? device.smoothedRssi,
+          device.smoothedRssi,
+        );
+        _heldPeakUntilMs[device.signature] = now + 10000;
       });
     });
 
@@ -140,46 +144,58 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
     });
   }
 
-  void _rebuildRecentOrder() {
-    if (_devicesBySig.isEmpty) {
-      _displayOrder = [];
-      return;
+  List<TrackerDevice> get devices {
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    for (final sig in _heldPeakUntilMs.keys.toList()) {
+      if ((_heldPeakUntilMs[sig] ?? 0) < now) {
+        _heldPeakRssi.remove(sig);
+        _heldPeakUntilMs.remove(sig);
+      }
     }
 
-    final sigs = _devicesBySig.keys.toList();
+    final list = _devicesBySig.values.toList();
 
-    sigs.sort((a, b) {
-      final da = _devicesBySig[a]!;
-      final db = _devicesBySig[b]!;
-      final c = db.lastSeenMs.compareTo(da.lastSeenMs);
-      if (c != 0) return c;
+    if (FiltersModel.state.sortMode == SortMode.distanceAsc) {
+      list.sort((a, b) {
+        final aFresh = (now - a.lastSeenMs) <= _freshPriorityWindowMs;
+        final bFresh = (now - b.lastSeenMs) <= _freshPriorityWindowMs;
 
-      final ia = _displayOrder.indexOf(a);
-      final ib = _displayOrder.indexOf(b);
-      if (ia == -1 && ib == -1) return 0;
-      if (ia == -1) return 1;
-      if (ib == -1) return -1;
-      return ia.compareTo(ib);
-    });
+        if (aFresh != bFresh) return aFresh ? -1 : 1;
 
-    _displayOrder = sigs;
-  }
+        final recentGap = (a.lastSeenMs - b.lastSeenMs).abs();
+        if (recentGap > 5000) {
+          return b.lastSeenMs.compareTo(a.lastSeenMs);
+        }
 
-  List<TrackerDevice> get devices {
-    final mode = FiltersModel.state.sortMode;
+        final c = a.distanceMeters.compareTo(b.distanceMeters);
+        if (c != 0) return c;
 
-    if (mode == SortMode.distanceAsc) {
-      final list = _devicesBySig.values.toList()
-        ..sort((a, b) => a.distanceMeters.compareTo(b.distanceMeters));
+        return b.lastSeenMs.compareTo(a.lastSeenMs);
+      });
       return list;
     }
 
-    if (_displayOrder.isEmpty) _rebuildRecentOrder();
+    list.sort((a, b) {
+      final aFresh = (now - a.lastSeenMs) <= _freshPriorityWindowMs;
+      final bFresh = (now - b.lastSeenMs) <= _freshPriorityWindowMs;
 
-    return _displayOrder
-        .where(_devicesBySig.containsKey)
-        .map((sig) => _devicesBySig[sig]!)
-        .toList();
+      if (aFresh != bFresh) return aFresh ? -1 : 1;
+
+      final recentGap = (a.lastSeenMs - b.lastSeenMs).abs();
+      if (recentGap > 5000) {
+        return b.lastSeenMs.compareTo(a.lastSeenMs);
+      }
+
+      final ar = _heldPeakRssi[a.signature] ?? a.smoothedRssi;
+      final br = _heldPeakRssi[b.signature] ?? b.smoothedRssi;
+      final c = br.compareTo(ar);
+      if (c != 0) return c;
+
+      return b.lastSeenMs.compareTo(a.lastSeenMs);
+    });
+
+    return list;
   }
 
   Future<void> toggleScan() async {
@@ -189,6 +205,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       await BleBridge.stopScan();
       await _motionSub?.cancel();
       _motionSub = null;
+      _liveDotCtrl.stop();
 
       setState(() {
         scanning = false;
@@ -198,6 +215,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
     } else {
       await BleBridge.startScan();
       _startMotionDetection();
+      _liveDotCtrl.repeat(reverse: true);
 
       setState(() {
         scanning = true;
@@ -218,20 +236,26 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       _lastMag = magnitude;
 
       if (delta > _movementThreshold) {
-        // BLE scan already running continuously
+        // Continuous BLE scan already active.
       }
     });
   }
 
   Future<void> _checkFirstLaunchTutorial() async {
     final prefs = await SharedPreferences.getInstance();
-
-    // For testing quickstart tutorial only, uncomment this:
-    // await prefs.setBool('seen_quick_start_guide', false);
-
     final seen = prefs.getBool('seen_quick_start_guide') ?? false;
-    if (seen || !mounted) return;
+
+    if (!mounted) return;
     if (_materialContext == null) return;
+
+    setState(() {
+      _missionChosenThisLaunch = false;
+    });
+
+    if (seen) {
+      await _showMissionPrompt();
+      return;
+    }
 
     await _showTutorialStartPrompt();
   }
@@ -239,6 +263,13 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
   Future<void> _markTutorialSeen() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('seen_quick_start_guide', true);
+  }
+
+  void _closeEntireTutorial() {
+    _tutorialClosedEarly = true;
+    if (_navigatorKey.currentState != null) {
+      _navigatorKey.currentState!.popUntil((route) => route.isFirst);
+    }
   }
 
   Future<void> _showTutorialStartPrompt() async {
@@ -274,6 +305,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
                 if (_navigatorKey.currentState != null) {
                   _navigatorKey.currentState!.pop();
                 }
+                await _showMissionPrompt();
               },
               child: const Text('Skip'),
             ),
@@ -285,12 +317,123 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
                 await Future.delayed(const Duration(milliseconds: 250));
                 await _markTutorialSeen();
                 await _startQuickGuide();
+                await _showMissionPrompt();
               },
               child: const Text('Start Guide'),
             ),
           ],
         );
       },
+    );
+  }
+
+  Future<void> _showMissionPrompt() async {
+    final ctx = _materialContext;
+    if (ctx == null || !mounted) return;
+
+    await showDialog(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+        titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+        contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        title: const Text(
+          'Package mission / search mission',
+          style: TextStyle(
+            fontFamily: 'Inter',
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        content: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _missionCard(
+                title: 'Sealed package search',
+                body:
+                'I\'m determining if there is a tag inside of a sealed package. Metal safe, cardboard, plastic, or another confined item.',
+                onTap: () {
+                  FiltersModel.applyMissionPreset(MissionMode.packageSearch);
+                  if (mounted) {
+                    setState(() {
+                      _missionChosenThisLaunch = true;
+                    });
+                  }
+                  Navigator.of(ctx).pop();
+                },
+              ),
+              const SizedBox(height: 10),
+              _missionCard(
+                title: 'Known-area tag hunt',
+                body:
+                'I\'m hunting for a possible tag in a known area such as a vehicle or backpack.',
+                onTap: () {
+                  FiltersModel.applyMissionPreset(
+                    MissionMode.wideAreaHiddenTag,
+                  );
+                  if (mounted) {
+                    setState(() {
+                      _missionChosenThisLaunch = true;
+                    });
+                  }
+                  Navigator.of(ctx).pop();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _missionCard({
+    required String title,
+    required String body,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.grey.shade50,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.grey.shade300),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                body,
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 13,
+                  height: 1.35,
+                  color: Colors.grey.shade800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -323,11 +466,13 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
   Future<void> _startQuickGuide() async {
     if (_tutorialRunning || !mounted) return;
     _tutorialRunning = true;
+    _tutorialClosedEarly = false;
 
     if (scanning) {
       await BleBridge.stopScan();
       await _motionSub?.cancel();
       _motionSub = null;
+      _liveDotCtrl.stop();
       setState(() {
         scanning = false;
         lastScanTime = DateTime.now();
@@ -339,19 +484,31 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
     await Future.delayed(const Duration(milliseconds: 900));
 
     await _runDistanceTutorial();
-    if (!mounted) return;
+    if (!mounted || _tutorialClosedEarly) {
+      _tutorialRunning = false;
+      return;
+    }
 
     await _openSearchTutorialFromDemoTracker();
-    if (!mounted) return;
+    if (!mounted || _tutorialClosedEarly) {
+      _tutorialRunning = false;
+      return;
+    }
 
     setState(() => pageIndex = 1);
     await Future.delayed(const Duration(milliseconds: 900));
 
     await _runIdentifyTutorial();
-    if (!mounted) return;
+    if (!mounted || _tutorialClosedEarly) {
+      _tutorialRunning = false;
+      return;
+    }
 
     await _runDrawerTutorial();
-    if (!mounted) return;
+    if (!mounted || _tutorialClosedEarly) {
+      _tutorialRunning = false;
+      return;
+    }
 
     setState(() => pageIndex = 0);
     _tutorialRunning = false;
@@ -364,28 +521,35 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
         id: 'scan_button',
         title: 'Start and stop scanning',
         body: 'Press Scan here to stop and start device scanning.',
+        showSkip: true,
+        showClose: false,
+        onCloseAll: _closeEntireTutorial,
       ),
       tutorialTarget(
         key: _trackerListKey,
         id: 'distance_list',
         title: 'Detected tags',
         body:
-        'Tags will show up here along with signal strength, name, and distance.',
-        // Box offset was too high needed to be lowered:
+        'Undesignated tags show here with signal strength, UUID/MAC preview, and distance.',
         yOffset: 110,
+        showClose: true,
+        onCloseAll: _closeEntireTutorial,
       ),
       tutorialTarget(
         key: _firstTrackerCardKey,
         id: 'open_tracker',
-        title: 'Open a tracker',
-        body: 'You can click a tag to open a more detailed page.',
+        title: 'Open a tag',
+        body: 'Tap a tag to open the detailed search page.',
+        showClose: true,
+        isLastStep: true,
+        onCloseAll: _closeEntireTutorial,
       ),
     ]);
   }
 
   Future<void> _openSearchTutorialFromDemoTracker() async {
     final navContext = _materialContext;
-    if (navContext == null) return;
+    if (navContext == null || _tutorialClosedEarly) return;
 
     await Future.delayed(const Duration(milliseconds: 250));
 
@@ -405,9 +569,12 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
       tutorialTarget(
         key: _identifyTabsKey,
         id: 'identify_tabs',
-        title: 'Identify page',
+        title: 'Classified tags',
         body:
-        'Trackers will be categorized here once the user picks a category on the other page.',
+        'Tags can be moved into undesignated, friendly, nonsuspect, or suspect.',
+        showClose: true,
+        isLastStep: true,
+        onCloseAll: _closeEntireTutorial,
       ),
     ]);
   }
@@ -418,30 +585,57 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
 
     await _showCoach([
       tutorialTarget(
+        key: _drawerQuickStartKey,
+        id: 'drawer_quick_start',
+        title: 'Quick Start',
+        body: 'Use this to rerun the tutorial any time.',
+        showClose: true,
+        onCloseAll: _closeEntireTutorial,
+      ),
+      tutorialTarget(
+        key: _drawerGuidanceKey,
+        id: 'drawer_guidance',
+        title: 'LEO Guidance',
+        body: 'Open law-enforcement guidance here.',
+        showClose: true,
+        onCloseAll: _closeEntireTutorial,
+      ),
+      tutorialTarget(
         key: _drawerFiltersKey,
         id: 'drawer_filters',
-        title: 'Filter options',
-        body: 'Use these filter options to control what trackers are shown.',
+        title: 'Filters',
+        body: 'Use filters to control search behavior.',
+        showClose: true,
+        onCloseAll: _closeEntireTutorial,
       ),
       tutorialTarget(
         key: _drawerReportsKey,
         id: 'drawer_reports',
         title: 'Reports page',
-        body: 'Suspect tracker reports will show up here.',
+        body: 'Saved suspect or found reports show up here.',
+        showClose: true,
+        onCloseAll: _closeEntireTutorial,
+      ),
+      tutorialTarget(
+        key: _drawerAdvancedKey,
+        id: 'drawer_advanced',
+        title: 'Advanced Features',
+        body: 'Use this area for clearing saved tag designations.',
+        showClose: true,
+        isLastStep: true,
+        onCloseAll: _closeEntireTutorial,
       ),
     ]);
 
-    if (!mounted || _materialContext == null) return;
-
+    if (!mounted || _materialContext == null || _tutorialClosedEarly) return;
     Navigator.of(_materialContext!).pop();
     await Future.delayed(const Duration(milliseconds: 300));
-
   }
 
   @override
   void dispose() {
-    _orderTimer?.cancel();
     _fadeCtrl.dispose();
+    _liveDotCtrl.dispose();
     _motionSub?.cancel();
     _bleSub?.cancel();
     super.dispose();
@@ -450,15 +644,26 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
   @override
   Widget build(BuildContext context) {
     final trackedDevices = devices
-        .where((d) => d.isLikelyAirTag || d.isLikelyTile || d.isLikelySamsung)
+        .where((d) =>
+    d.isLikelyAirTag ||
+        d.isLikelyFindMy ||
+        d.isLikelyTile ||
+        d.isLikelySamsung)
         .toList();
 
     final tutorialTrackedDevices =
     _tutorialRunning ? <TrackerDevice>[_demoTutorialDevice] : trackedDevices;
 
+    final missionLabel = !_missionChosenThisLaunch
+        ? 'Select mission'
+        : FiltersModel.state.missionMode == MissionMode.packageSearch
+        ? 'Package mission'
+        : 'Known-area hunt';
+
     return MaterialApp(
-      navigatorKey: _navigatorKey,
       debugShowCheckedModeBanner: false,
+      title: 'LeoFindIt',
+      navigatorKey: _navigatorKey,
       home: Builder(
         builder: (materialContext) {
           _materialContext = materialContext;
@@ -487,20 +692,22 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
             child: Scaffold(
               key: _scaffoldKey,
               drawer: AppDrawer(
+                quickStartTileKey: _drawerQuickStartKey,
+                guidanceTileKey: _drawerGuidanceKey,
                 filtersTileKey: _drawerFiltersKey,
                 reportsTileKey: _drawerReportsKey,
+                advancedTileKey: _drawerAdvancedKey,
+                onQuickStart: _startQuickGuide,
               ),
-              // The hamburger menu icon is below
               appBar: AppBar(
                 leading: IconButton(
-                  key: _drawerButtonKey,
                   icon: const Icon(Icons.menu, size: 30),
                   onPressed: () => _scaffoldKey.currentState?.openDrawer(),
                 ),
                 centerTitle: true,
                 title: Container(
                   padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                   decoration: BoxDecoration(
                     color: Colors.black,
                     borderRadius: BorderRadius.circular(999),
@@ -518,21 +725,101 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
                         ),
                       ),
                       const SizedBox(width: 8),
-                      const Text(
-                        'LEOFindIt',
-                        style: TextStyle(
-                          fontFamily: 'Inter',
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14,
-                          letterSpacing: 0.7,
+                      ScaleTransition(
+                        scale: scanning
+                            ? _liveDotAnim
+                            : const AlwaysStoppedAnimation(1.0),
+                        child: Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(
+                            color: scanning
+                                ? const Color(0xFFE53935)
+                                : Colors.grey.shade600,
+                            shape: BoxShape.circle,
+                            boxShadow: scanning
+                                ? [
+                              BoxShadow(
+                                color: const Color(0xFFE53935)
+                                    .withOpacity(0.55),
+                                blurRadius: 8,
+                                spreadRadius: 1,
+                              ),
+                            ]
+                                : null,
+                          ),
                         ),
                       ),
                     ],
                   ),
                 ),
               ),
-              body: pages[pageIndex],
+              body: Column(
+                children: [
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                    color: const Color(0xFFF6F5F8),
+                    child: Wrap(
+                      alignment: WrapAlignment.center,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(color: const Color(0xFFD8D4DE)),
+                          ),
+                          child: Text(
+                            missionLabel,
+                            style: const TextStyle(
+                              fontFamily: 'Inter',
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF5A5562),
+                            ),
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: scanning
+                                ? const Color(0xFFE8F5E9)
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: scanning
+                                  ? const Color(0xFF81C784)
+                                  : const Color(0xFFD8D4DE),
+                            ),
+                          ),
+                          child: Text(
+                            scanning ? 'Scanning active' : 'Scan stopped',
+                            style: TextStyle(
+                              fontFamily: 'Inter',
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: scanning
+                                  ? const Color(0xFF2E7D32)
+                                  : const Color(0xFF5A5562),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(child: pages[pageIndex]),
+                ],
+              ),
               bottomNavigationBar: SizedBox(
                 height: 71,
                 child: BottomNavigationBar(
@@ -551,7 +838,7 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
                     ),
                     BottomNavigationBarItem(
                       icon: Icon(Icons.list_alt),
-                      label: 'Identify',
+                      label: 'Classified Tags',
                     ),
                   ],
                 ),
@@ -563,4 +850,3 @@ class _LeoTrackerAppState extends State<LeoTrackerApp>
     );
   }
 }
-

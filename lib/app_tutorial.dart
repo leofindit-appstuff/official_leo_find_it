@@ -10,6 +10,10 @@ TargetFocus tutorialTarget({
   required String body,
   ContentAlign align = ContentAlign.bottom,
   double yOffset = 0,
+  bool showSkip = false,
+  bool showClose = true,
+  bool isLastStep = false,
+  VoidCallback? onCloseAll,
 }) {
   return TargetFocus(
     identify: id,
@@ -31,6 +35,7 @@ TargetFocus tutorialTarget({
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: Colors.grey.shade300),
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -59,15 +64,23 @@ TargetFocus tutorialTarget({
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      TextButton(
-                        onPressed: controller.skip,
-                        child: const Text('Skip'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: controller.next,
-                        child: const Text('Next'),
-                      ),
+                      if (showSkip)
+                        TextButton(
+                          onPressed: onCloseAll ?? controller.skip,
+                          child: const Text('Skip'),
+                        ),
+                      if (showClose)
+                        TextButton(
+                          onPressed: onCloseAll ?? controller.skip,
+                          child: const Text('Close'),
+                        ),
+                      if (!isLastStep) ...[
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: controller.next,
+                          child: const Text('Next'),
+                        ),
+                      ],
                     ],
                   ),
                 ],

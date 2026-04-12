@@ -18,6 +18,7 @@ dependencies:
   share_plus: ^9.0.0
   tutorial_coach_mark: ^1.2.11
   shared_preferences: ^2.2.3
+  url_launcher: ^6.3.0
 
 flutter:
   uses-material-design: true
@@ -25,6 +26,10 @@ flutter:
   assets:
     - assets/leo_splash.png
     - assets/LeoPhoto.jpg
+    - assets/tile.png
+    - assets/smarttag2.png
+    - assets/airtag.png
+    - assets/findmy.png
 
   fonts:
 

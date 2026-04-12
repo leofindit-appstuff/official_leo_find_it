@@ -40,13 +40,15 @@ class DistancePage extends StatefulWidget {
 }
 
 class _DistancePageState extends State<DistancePage> {
+  static const int _freshPriorityWindowMs = 15 * 1000;
+
   Timer? _tick;
   int _nowMs = DateTime.now().millisecondsSinceEpoch;
 
   @override
   void initState() {
     super.initState();
-    _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    _tick = Timer.periodic(const Duration(milliseconds: 2000), (_) {
       if (!mounted) return;
       setState(() => _nowMs = DateTime.now().millisecondsSinceEpoch);
     });
@@ -85,12 +87,93 @@ class _DistancePageState extends State<DistancePage> {
     return "$mm:$ss";
   }
 
-  int _bars(int rssi) {
-    if (rssi >= -55) return 5;
-    if (rssi >= -65) return 4;
-    if (rssi >= -75) return 3;
-    if (rssi >= -85) return 2;
-    return 1;
+  String _assetForDevice(TrackerDevice d) {
+    if (d.isLikelyAirTag) return 'assets/airtag.png';
+    if (d.isLikelyTile) return 'assets/tile.png';
+    if (d.isLikelyFindMy) return 'assets/findmy.png';
+    if (d.isLikelySamsung) return 'assets/smarttag2.png';
+    return 'assets/leo_splash.png';
+  }
+
+  bool _isFresh(TrackerDevice d) {
+    return (_nowMs - d.lastSeenMs) <= _freshPriorityWindowMs;
+  }
+
+  List<TrackerDevice> _sortedForDistancePage(
+      List<TrackerDevice> input,
+      FiltersState filters,
+      ) {
+    final list = [...input];
+
+    if (filters.sortMode == SortMode.distanceAsc) {
+      list.sort((a, b) {
+        final aFresh = _isFresh(a);
+        final bFresh = _isFresh(b);
+
+        if (aFresh != bFresh) return aFresh ? -1 : 1;
+
+        final recentGap = (a.lastSeenMs - b.lastSeenMs).abs();
+        if (recentGap > 5000) {
+          return b.lastSeenMs.compareTo(a.lastSeenMs);
+        }
+
+        final c = a.distanceUiM.compareTo(b.distanceUiM);
+        if (c != 0) return c;
+
+        return b.lastSeenMs.compareTo(a.lastSeenMs);
+      });
+      return list;
+    }
+
+    list.sort((a, b) {
+      final aFresh = _isFresh(a);
+      final bFresh = _isFresh(b);
+
+      if (aFresh != bFresh) return aFresh ? -1 : 1;
+
+      final recentGap = (a.lastSeenMs - b.lastSeenMs).abs();
+      if (recentGap > 5000) {
+        return b.lastSeenMs.compareTo(a.lastSeenMs);
+      }
+
+      final c = b.smoothedRssi.compareTo(a.smoothedRssi);
+      if (c != 0) return c;
+
+      return b.lastSeenMs.compareTo(a.lastSeenMs);
+    });
+
+    return list;
+  }
+
+  Future<void> _dismissUndesignated(TrackerDevice d) async {
+    await DeviceMarks.dismissUndesignated(d.stableKey);
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            '${d.displayName} removed from undesignated list',
+            style: const TextStyle(
+              fontFamily: 'Inter',
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          behavior: SnackBarBehavior.floating,
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () {
+              DeviceMarks.restoreUndesignated(d.stableKey);
+            },
+          ),
+        ),
+      );
+  }
+
+  bool _showOnMainPage(TrackerDevice d) {
+    final mark = DeviceMarks.get(d.stableKey);
+    return mark == DeviceMark.undesignated || mark == DeviceMark.suspect;
   }
 
   @override
@@ -102,20 +185,26 @@ class _DistancePageState extends State<DistancePage> {
           valueListenable: FiltersModel.notifier,
           builder: (_, s, ____) {
             final List<TrackerDevice> track;
+
             if (widget.tutorialMode && widget.tutorialDevice != null) {
               track = [widget.tutorialDevice!];
             } else {
-              track = widget.devices
-                  .where((d) =>
-              d.isLikelyAirTag || d.isLikelyTile || d.isLikelySamsung)
-                  .where((d) {
-                final mark =
-                    DeviceMarks.get(d.signature) ?? DeviceMark.unknown;
-                return mark == DeviceMark.unknown;
-              }).where((d) {
-                if (!s.filterByRssi) return true;
-                return d.smoothedRssi >= s.rssiThreshold;
-              }).toList();
+              track = _sortedForDistancePage(
+                widget.devices
+                    .where((d) =>
+                d.isLikelyAirTag ||
+                    d.isLikelyTile ||
+                    d.isLikelyFindMy ||
+                    d.isLikelySamsung)
+                    .where((d) => _showOnMainPage(d))
+                    .where((d) =>
+                !DeviceMarks.isUndesignatedDismissed(d.stableKey))
+                    .where((d) {
+                  if (!s.filterByRssi) return true;
+                  return d.smoothedRssi >= s.rssiThreshold;
+                }).toList(),
+                s,
+              );
             }
 
             return Column(
@@ -127,32 +216,38 @@ class _DistancePageState extends State<DistancePage> {
                       ElevatedButton.icon(
                         key: widget.scanButtonKey,
                         icon: Icon(
-                          widget.scanning ? Icons.stop : Icons.play_arrow,
-                          size: 28,
-                          color: Colors.blueAccent,
+                          widget.scanning
+                              ? Icons.stop_circle_rounded
+                              : Icons.play_circle_fill_rounded,
+                          size: 24,
+                          color: Colors.white,
                         ),
                         label: Text(
                           widget.scanning ? 'Stop Scan' : 'Start Scan',
                           style: const TextStyle(
                             fontFamily: 'Inter',
-                            fontSize: 19,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.blueAccent,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white,
+                            letterSpacing: 0.2,
                           ),
                         ),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.grey.shade50,
-                          elevation: 0,
+                          backgroundColor: widget.scanning
+                              ? const Color(0xFF58A1F1).withOpacity(0.95)
+                              : const Color(0xFF57A8F1).withOpacity(0.95),
+                          elevation: 2,
+                          shadowColor: Colors.black26,
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 30,
-                            vertical: 16,
+                            horizontal: 40,
+                            vertical: 22,
                           ),
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(999),
-                            side: BorderSide(
-                              color: Colors.blueAccent.withOpacity(0.25),
-                              width: 1.2,
-                            ),
+                            borderRadius: BorderRadius.circular(35),
+                          ),
+                        ).copyWith(
+                          overlayColor: WidgetStatePropertyAll(
+                            Colors.white.withOpacity(0.20),
                           ),
                         ),
                         onPressed: widget.onRescan,
@@ -181,10 +276,10 @@ class _DistancePageState extends State<DistancePage> {
                     child: track.isEmpty
                         ? const Center(
                       child: Text(
-                        'No trackers detected',
+                        'No undesignated or suspect tags detected',
                         style: TextStyle(
                           fontFamily: 'Inter',
-                          fontSize: 20,
+                          fontSize: 16,
                           fontWeight: FontWeight.w500,
                           color: Colors.grey,
                         ),
@@ -194,73 +289,166 @@ class _DistancePageState extends State<DistancePage> {
                       itemCount: track.length,
                       itemBuilder: (_, i) {
                         final d = track[i];
-                        return GestureDetector(
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => SearchPage(
-                                device: d,
-                                tutorialMode: widget.tutorialMode,
-                              ),
+                        final mark = DeviceMarks.get(d.stableKey);
+
+                        final card = Card(
+                          key: i == 0 ? widget.firstTrackerCardKey : null,
+                          margin: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 13,
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(20),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 68,
+                                  height: 68,
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey.shade100,
+                                    borderRadius:
+                                    BorderRadius.circular(16),
+                                  ),
+                                  padding: const EdgeInsets.all(4),
+                                  child: Image.asset(
+                                    _assetForDevice(d),
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
+                                const SizedBox(width: 20),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        d.displayName,
+                                        style: const TextStyle(
+                                          fontFamily: 'Inter',
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 22,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'UUID: …${d.shortUuid}',
+                                        style: TextStyle(
+                                          color: Colors.grey.shade700,
+                                        ),
+                                      ),
+                                      Text(
+                                        'MAC last 4: ${d.macTail4}',
+                                        style: TextStyle(
+                                          color: Colors.grey.shade700,
+                                        ),
+                                      ),
+                                      if (mark == DeviceMark.suspect) ...[
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'Marked suspect',
+                                          style: TextStyle(
+                                            color: Colors.red.shade700,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ],
+                                      if (d.mayBeRotatingDuplicate)
+                                        Text(
+                                          'Possible duplicate from rotating IDs',
+                                          style: TextStyle(
+                                            color: Colors.orange.shade700,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'Distance: ${d.distanceFt.toStringAsFixed(1)} ft',
+                                      ),
+                                      Text(
+                                        'RSSI: ${d.rssi} dBm • Seen ${_ageLabel(d.lastSeenMs)}',
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        _isFresh(d)
+                                            ? 'Active now'
+                                            : 'Older reading',
+                                        style: TextStyle(
+                                          fontFamily: 'Inter',
+                                          fontWeight: FontWeight.w700,
+                                          color: _isFresh(d)
+                                              ? const Color(0xFF2E7D32)
+                                              : Colors.grey.shade600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          child: Card(
-                            key: i == 0 ? widget.firstTrackerCardKey : null,
+                        );
+
+                        if (widget.tutorialMode) {
+                          return GestureDetector(
+                            onTap: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => SearchPage(
+                                  device: d,
+                                  tutorialMode: widget.tutorialMode,
+                                ),
+                              ),
+                            ),
+                            child: card,
+                          );
+                        }
+
+                        return Dismissible(
+                          key: ValueKey('undesignated_${d.stableKey}'),
+                          direction: DismissDirection.endToStart,
+                          background: Container(
                             margin: const EdgeInsets.symmetric(
                               horizontal: 18,
                               vertical: 13,
                             ),
-                            child: Padding(
-                              padding: const EdgeInsets.all(20),
-                              child: Row(
-                                children: [
-                                  const Icon(
-                                    Icons.signal_cellular_alt_rounded,
-                                    size: 46,
-                                    color: Colors.blueAccent,
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade300,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                            ),
+                            child: const Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.hide_source_rounded,
+                                  color: Colors.white,
+                                ),
+                                SizedBox(height: 6),
+                                Text(
+                                  'Hide',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w700,
                                   ),
-                                  const SizedBox(width: 20),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                      CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          d.displayName,
-                                          style: const TextStyle(
-                                            fontFamily: 'Inter',
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 22,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          'Distance: ${d.distanceFt.toStringAsFixed(1)} ft',
-                                        ),
-                                        Text(
-                                          'RSSI: ${d.rssi} dBm • Seen ${_ageLabel(d.lastSeenMs)}',
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Row(
-                                          children: List.generate(
-                                            5,
-                                                (i) => Icon(
-                                              Icons.signal_cellular_alt,
-                                              size: 20,
-                                              color: i <
-                                                  _bars(d.smoothedRssi
-                                                      .round())
-                                                  ? Colors.green
-                                                  : Colors.grey.shade300,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          onDismissed: (_) => _dismissUndesignated(d),
+                          child: GestureDetector(
+                            onTap: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => SearchPage(
+                                  device: d,
+                                  tutorialMode: widget.tutorialMode,
+                                ),
                               ),
                             ),
+                            child: card,
                           ),
                         );
                       },

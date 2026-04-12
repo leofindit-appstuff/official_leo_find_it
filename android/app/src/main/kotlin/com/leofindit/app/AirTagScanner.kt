@@ -11,13 +11,6 @@ import android.util.Log
 import java.security.MessageDigest
 import kotlin.math.pow
 
-
-// AirTag specific / Apple Find My BLE scanner
-// Correct behavior:
-// Groups rotating payloads under a single logical tracker
-// Prevents phantom / duplicate trackers
-// Evicts stale old trackers / signals
-
 class AirTagScanner(
     private val context: Context,
     private val onTrackerUpdate: (DetectedTracker) -> Unit
@@ -27,17 +20,15 @@ class AirTagScanner(
         private const val TAG = "AirTagScanner"
 
         private const val APPLE_MFG_ID = 0x004C
-        //Identify Apple Find My / AirTag BLE packets
         private val FIND_MY_UUID =
             ParcelUuid.fromString("0000FD44-0000-1000-8000-00805F9B34FB")
-        //Correlate rotating tracker identifiers
         private const val STABLE_PREFIX_LEN = 4
-        //Expire trackers after 20 seconds
         private const val TRACKER_TTL_MS = 20_000L
     }
 
     enum class TrackerKind {
         AIRTAG,
+        FIND_MY,
         TILE,
         SAMSUNG,
         APPLE_DEVICE,
@@ -59,6 +50,7 @@ class AirTagScanner(
 
     private data class TrackerState(
         val signature: String,
+        var kind: TrackerKind,
         var lastRssi: Int,
         var lastSeenMs: Long,
         var rawFrame: String,
@@ -81,7 +73,7 @@ class AirTagScanner(
         try {
             scanning = true
             scanner?.startScan(null, buildSettings(), callback)
-            Log.i(TAG, "AirTag scan started")
+            Log.i(TAG, "Apple Find My scan started")
         } catch (e: SecurityException) {
             scanning = false
             Log.w(TAG, "BLE scan blocked", e)
@@ -99,6 +91,7 @@ class AirTagScanner(
 
     private val callback = object : ScanCallback() {
         override fun onScanResult(type: Int, result: ScanResult) = handle(result)
+
         override fun onBatchScanResults(results: MutableList<ScanResult>) {
             results.forEach { handle(it) }
         }
@@ -111,19 +104,21 @@ class AirTagScanner(
 
         val fd44 = record.serviceData[FIND_MY_UUID]
         val appleMfg = record.manufacturerSpecificData.get(APPLE_MFG_ID)
+        val rawHex = bytes.toHex()
 
-        val isAirTag =
-            fd44 != null ||
-                    (appleMfg != null && isAirTagManufacturerFrame(appleMfg))
+        Log.d(
+            TAG,
+            "Apple scan candidate fd44=${fd44?.joinToString("") { "%02x".format(it) }} " +
+                    "appleMfg=${appleMfg?.joinToString("") { "%02x".format(it) }} " +
+                    "raw=$rawHex mac=${result.device?.address} rssi=${result.rssi} connectable=${result.isConnectable}"
+        )
 
-        if (!isAirTag) return
+        val trackerKind = classifyAppleTracker(fd44, appleMfg, result) ?: return
 
-        // Remove stale trackers
         trackers.entries.removeIf {
             now - it.value.lastSeenMs > TRACKER_TTL_MS
         }
 
-        // Stable fingerprint (never rotating bytes)
         val stableSource = when {
             fd44 != null && fd44.size >= STABLE_PREFIX_LEN ->
                 fd44.copyOfRange(0, STABLE_PREFIX_LEN)
@@ -137,11 +132,11 @@ class AirTagScanner(
         val signature = sha1(stableSource)
         val mac = result.device?.address
         val rssi = result.rssi
-        val rawHex = bytes.toHex()
 
         val state = trackers.getOrPut(signature) {
             TrackerState(
                 signature = signature,
+                kind = trackerKind,
                 lastRssi = rssi,
                 lastSeenMs = now,
                 rawFrame = rawHex,
@@ -159,11 +154,35 @@ class AirTagScanner(
         state.lastRssi = rssi
         state.rawFrame = rawHex
 
+        if (state.kind != TrackerKind.AIRTAG && trackerKind == TrackerKind.FIND_MY) {
+            state.kind = TrackerKind.FIND_MY
+        }
+
+        if (
+            state.kind == TrackerKind.FIND_MY &&
+            state.rotatingMacCount >= 4 &&
+            !state.lastMac.isNullOrBlank() &&
+            looksLikeAirTagFrame(state.rawFrame)
+        ) {
+            state.kind = TrackerKind.AIRTAG
+        }
+
+        Log.d(
+            TAG,
+            "classified kind=${state.kind} sig=$signature mac=$mac rotations=${state.rotatingMacCount} raw=$rawHex"
+        )
+
+        val kindPrefix = when (state.kind) {
+            TrackerKind.AIRTAG -> "AIRTAG"
+            TrackerKind.FIND_MY -> "FINDMY"
+            else -> "APPLE"
+        }
+
         onTrackerUpdate(
             DetectedTracker(
-                id = "AIRTAG_$signature",
-                logicalId = "AIRTAG_$signature",
-                kind = TrackerKind.AIRTAG,
+                id = "${kindPrefix}_$signature",
+                logicalId = "${kindPrefix}_$signature",
+                kind = state.kind,
                 address = mac,
                 rssi = rssi,
                 distanceMeters = estimateDistance(rssi),
@@ -175,13 +194,54 @@ class AirTagScanner(
         )
     }
 
-    private fun isAirTagManufacturerFrame(mfg: ByteArray): Boolean {
-        if (mfg.size < 20 || mfg.size > 28) return false
-        val t0 = mfg[0].toInt() and 0xFF
-        val t1 = mfg[1].toInt() and 0xFF
-        return (t0 == 0x12 && t1 == 0x19) ||
-                (t0 == 0x10 && t1 == 0x05) ||
-                (t0 == 0x12 && t1 == 0x02)
+    private fun classifyAppleTracker(
+        fd44: ByteArray?,
+        appleMfg: ByteArray?,
+        result: ScanResult
+    ): TrackerKind? {
+        val hasFindMy = fd44 != null
+        val mfg = appleMfg
+
+        val deviceName = result.scanRecord?.deviceName ?: ""
+        val isConnectable = result.isConnectable
+
+        if (deviceName.isNotBlank()) {
+            return null
+        }
+
+        if (mfg != null && mfg.size >= 3) {
+            val b0 = mfg[0].toInt() and 0xFF
+            val b1 = mfg[1].toInt() and 0xFF
+            val b2 = mfg[2].toInt() and 0xFF
+            val b3 = if (mfg.size > 3) mfg[3].toInt() and 0xFF else -1
+
+            if (b0 == 0x12 && b1 == 0x19 && b2 == 0x10) {
+                return TrackerKind.FIND_MY
+            }
+
+            if (b0 == 0x12 && b1 == 0x02 && b2 == 0x00 && (b3 == 0x00 || b3 == 0x01)) {
+                return if (hasFindMy || !isConnectable) TrackerKind.FIND_MY else null
+            }
+
+            if (b0 == 0x12 && b1 == 0x19 && b2 == 0x20) {
+                return TrackerKind.FIND_MY
+            }
+
+            if (mfg.size in 18..32 && !isConnectable) {
+                return TrackerKind.FIND_MY
+            }
+        }
+
+        if (hasFindMy) {
+            return TrackerKind.FIND_MY
+        }
+
+        return null
+    }
+
+    private fun looksLikeAirTagFrame(rawHex: String): Boolean {
+        val lower = rawHex.lowercase()
+        return lower.contains("4c00121920")
     }
 
     private fun buildSettings(): ScanSettings =

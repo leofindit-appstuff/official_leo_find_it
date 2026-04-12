@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'device_marks.dart';
 import 'models.dart';
 import 'ble_bridge.dart';
 import 'reports_store.dart';
 import 'app_tutorial.dart';
+import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 
 class SearchPage extends StatefulWidget {
   final TrackerDevice device;
@@ -32,34 +33,19 @@ class _SearchPageState extends State<SearchPage>
 
   Timer? _uiTimer;
   TrackerDevice? _pending;
-  static const int _uiFrameMs = 60;
-
-  static const double _foundThresholdM = 0.10;
-  static const double _foundReleaseM = 0.35;
-  static const int _foundHoldMs = 1800;
-
-  int? _foundAtMs;
-  bool _hapticFired = false;
+  static const int _uiFrameMs = 80;
 
   double? _displayDistanceM;
-
-  double? _dirRssi;
-  double _rssiVelocity = 0.0;
-  int _lastDirChangeMs = 0;
-
-  static const double _rssiEmaAlpha = 0.18;
-  static const double _velocityAlpha = 0.25;
-  static const double _deadband = 0.25;
-  static const int _directionHoldMs = 400;
-
-  String direction = 'Hold steady';
-  IconData arrow = Icons.navigation;
+  double? _displayRssi;
 
   late AnimationController _pulseCtrl;
   late Animation<double> _pulseAnim;
 
   Timer? _ageTick;
   int _nowMs = DateTime.now().millisecondsSinceEpoch;
+
+  bool _manuallyFound = false;
+  TrackerReport? _foundReport;
 
   final GlobalKey _distanceInfoKey = GlobalKey();
   final GlobalKey _signalStrengthKey = GlobalKey();
@@ -70,21 +56,12 @@ class _SearchPageState extends State<SearchPage>
     super.initState();
     live = widget.device;
 
-    if (DeviceMarks.get(widget.device.signature) == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        if (DeviceMarks.get(widget.device.signature) == null) {
-          DeviceMarks.set(widget.device.signature, DeviceMark.unknown);
-        }
-      });
-    }
-
     _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
     );
 
-    _pulseAnim = Tween<double>(begin: 1.0, end: 1.06)
+    _pulseAnim = Tween<double>(begin: 1.0, end: 1.04)
         .chain(CurveTween(curve: Curves.easeInOut))
         .animate(_pulseCtrl);
 
@@ -96,6 +73,7 @@ class _SearchPageState extends State<SearchPage>
 
       _uiTimer = Timer.periodic(const Duration(milliseconds: _uiFrameMs), (_) {
         if (!mounted || _pending == null) return;
+
         setState(() {
           _updateState(_pending!);
           live = _pending;
@@ -103,6 +81,7 @@ class _SearchPageState extends State<SearchPage>
       });
     } else {
       _displayDistanceM = widget.device.distanceUiM;
+      _displayRssi = widget.device.smoothedRssi;
       _updateState(widget.device);
     }
 
@@ -152,32 +131,30 @@ class _SearchPageState extends State<SearchPage>
         id: 'search_distance',
         title: 'Distance and signal',
         body: 'Tracker distance and signal strengths are displayed here.',
+        showClose: true,
       ),
       tutorialTarget(
         key: _signalStrengthKey,
         id: 'search_signal_colors',
         title: 'Signal strength colors',
         body: 'Grey, yellow, and green show strength from weakest to strongest.',
+        showClose: true,
       ),
       tutorialTarget(
         key: _categoryTabsKey,
         id: 'search_categories',
         title: 'Tracker categories',
         body:
-        'You can put a tracker in three categories: Friendly, Unknown, and Suspect. If you use Suspect, it will create a report.',
+        'You can put a tracker in four categories: Undesignated, Friendly, Nonsuspect, and Suspect.',
         align: ContentAlign.top,
+        showClose: true,
+        isLastStep: true,
       ),
     ]);
 
     if (mounted) {
       Navigator.pop(context);
     }
-  }
-
-  bool _isFound(TrackerDevice d) {
-    final dist = d.distanceUiM;
-    if (dist.isNaN) return false;
-    return dist >= 0 && dist <= _foundThresholdM;
   }
 
   String _feetLabel(double meters) {
@@ -210,7 +187,7 @@ class _SearchPageState extends State<SearchPage>
       case ProximityBand.close:
         return const Color(0xFFF9A825);
       case ProximityBand.far:
-        return const Color(0xFFEF6C00);
+        return Colors.grey.shade500;
       case ProximityBand.unknown:
         return Colors.grey.shade500;
     }
@@ -232,105 +209,133 @@ class _SearchPageState extends State<SearchPage>
   }
 
   void _updateState(TrackerDevice d) {
-    final now = DateTime.now().millisecondsSinceEpoch;
-
     final rawDist = d.distanceUiM;
+    final rawRssi = d.smoothedRssi;
 
     _displayDistanceM ??= rawDist;
-    _displayDistanceM = (_displayDistanceM! * 0.90) + (rawDist * 0.10);
+    _displayRssi ??= rawRssi;
 
-    if (_isFound(d)) {
-      _foundAtMs ??= now;
+    final distanceDelta = rawDist - _displayDistanceM!;
+    const maxUiStepM = 0.18;
 
-      if (!_hapticFired && !widget.tutorialMode) {
-        HapticFeedback.lightImpact();
-        _hapticFired = true;
-      }
-
-      if (!_pulseCtrl.isAnimating) {
-        _pulseCtrl.repeat(reverse: true);
-      }
-
-      direction = 'FOUND';
-      arrow = Icons.check_rounded;
-      return;
+    double clampedDistance = rawDist;
+    if (distanceDelta.abs() > maxUiStepM) {
+      clampedDistance =
+          _displayDistanceM! + (distanceDelta.isNegative ? -maxUiStepM : maxUiStepM);
     }
 
-    if (_foundAtMs != null) {
-      final held = now - _foundAtMs! < _foundHoldMs;
-      final stillClose = d.distanceUiM <= _foundReleaseM;
-
-      if (held || stillClose) {
-        direction = 'FOUND';
-        arrow = Icons.check_rounded;
-        return;
-      }
-
-      _foundAtMs = null;
-      _hapticFired = false;
-      _pulseCtrl.stop();
-      _pulseCtrl.reset();
-    }
-
-    final rawRssi = d.rssi.toDouble();
-    _dirRssi ??= rawRssi;
-
-    final prevRssi = _dirRssi!;
-    _dirRssi = (_dirRssi! * (1 - _rssiEmaAlpha)) + (rawRssi * _rssiEmaAlpha);
-
-    final delta = _dirRssi! - prevRssi;
-    _rssiVelocity =
-        (_rssiVelocity * (1 - _velocityAlpha)) + (delta * _velocityAlpha);
-
-    if (_rssiVelocity.abs() < _deadband) {
-      direction = 'Hold steady';
-      arrow = Icons.navigation;
-      return;
-    }
-
-    if (now - _lastDirChangeMs < _directionHoldMs) return;
-
-    if (_rssiVelocity > 0) {
-      direction = 'Getting closer';
-      arrow = Icons.arrow_circle_up_rounded;
-      _lastDirChangeMs = now;
-    } else {
-      direction = 'Moving away';
-      arrow = Icons.arrow_circle_down_rounded;
-      _lastDirChangeMs = now;
-    }
+    _displayDistanceM = (_displayDistanceM! * 0.96) + (clampedDistance * 0.04);
+    _displayRssi = (_displayRssi! * 0.90) + (rawRssi * 0.10);
   }
 
   Future<void> _setMark(TrackerDevice d, DeviceMark mark) async {
+    await DeviceMarks.set(d.stableKey, mark);
+
+    if (!mounted) return;
+
+    setState(() {});
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            '${d.displayName} marked ${mark.label.toLowerCase()}',
+            style: const TextStyle(
+              fontFamily: 'Inter',
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+  }
+
+  Future<void> _markFound() async {
     setState(() {
-      DeviceMarks.set(d.signature, mark);
+      _manuallyFound = true;
     });
 
-    if (mark == DeviceMark.suspect) {
-      if (!widget.tutorialMode) {
-        await ReportsStore.createFromDevice(d);
-      }
+    _pulseCtrl.repeat(reverse: true);
+    HapticFeedback.mediumImpact();
 
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Tag marked as found. Scan remains live.'),
+      ),
+    );
+  }
+
+  Future<void> _createReport() async {
+    if (widget.tutorialMode) return;
+
+    final d = live ?? widget.device;
+
+    if (_foundReport != null) {
       if (!mounted) return;
-
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          SnackBar(
-            content: Text(
-              widget.tutorialMode
-                  ? 'Suspect would create a report here.'
-                  : 'Report created for ${d.displayName}',
-              style: const TextStyle(
-                fontFamily: 'Inter',
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 3),
+          const SnackBar(
+            content: Text('Report already created for this tag in this session.'),
           ),
         );
+      return;
     }
+
+    final report = await ReportsStore.createFromDevice(d);
+    _foundReport = report;
+
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            'Report created for ${d.displayName}',
+            style: const TextStyle(
+              fontFamily: 'Inter',
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+  }
+
+  Future<void> _launchEmail() async {
+    final d = live ?? widget.device;
+    final body = '''
+LeoFindIt feedback
+
+Tag type: ${d.displayName}
+UUID tail: ${d.shortUuid}
+Observed at: ${DateTime.now()}
+
+Please enter your feedback here.
+''';
+
+    final uri = Uri(
+      scheme: 'mailto',
+      path: 'leofindit@icloud.com',
+      queryParameters: {
+        'subject': 'LeoFindIt Report Feedback',
+        'body': body,
+      },
+    );
+
+    await launchUrl(uri);
+  }
+
+  Future<void> _launchSms() async {
+    final d = live ?? widget.device;
+    final body =
+        'LeoFindIt feedback\nType: ${d.displayName}\nUUID tail: ${d.shortUuid}\n';
+    final uri = Uri.parse('sms:8015281285?body=${Uri.encodeComponent(body)}');
+    await launchUrl(uri);
   }
 
   @override
@@ -345,14 +350,41 @@ class _SearchPageState extends State<SearchPage>
   @override
   Widget build(BuildContext context) {
     final d = live ?? widget.device;
-
-    final band = _bandFromRssi(d.smoothedRssi);
+    final band = _bandFromRssi(_displayRssi ?? d.smoothedRssi);
     final color = _bandColor(band);
+    final mark = DeviceMarks.get(d.stableKey);
 
-    final mark = DeviceMarks.get(d.signature) ?? DeviceMark.unknown;
+    final Color centerCircleColor =
+    _manuallyFound ? const Color(0xFF2E7D32) : color;
+
+    final IconData centerIcon =
+    _manuallyFound ? Icons.check_rounded : Icons.navigation_rounded;
+
+    final String statusText =
+    _manuallyFound ? 'Tag located' : _bandLabel(band);
 
     return Scaffold(
       appBar: AppBar(
+        leadingWidth: 132,
+        leading: Padding(
+          padding: const EdgeInsets.only(left: 8),
+          child: TextButton.icon(
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFF1565C0),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            ),
+            onPressed: () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.arrow_back_rounded, size: 28),
+            label: const Text(
+              'Main Scan',
+              style: TextStyle(
+                fontFamily: 'Inter',
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+              ),
+            ),
+          ),
+        ),
         title: Text(
           d.displayName,
           style: const TextStyle(
@@ -362,90 +394,170 @@ class _SearchPageState extends State<SearchPage>
         ),
       ),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ScaleTransition(
-              scale: _foundAtMs != null
-                  ? _pulseAnim
-                  : const AlwaysStoppedAnimation(1.0),
-              child: Container(
-                width: 170,
-                height: 170,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _foundAtMs != null ? color : null,
-                  gradient: _foundAtMs != null
-                      ? null
-                      : const LinearGradient(
-                    colors: [Color(0xFF0996D1), Color(0xFF2084E8)],
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(18, 18, 18, 32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const SizedBox(height: 18),
+              ScaleTransition(
+                scale: _manuallyFound
+                    ? _pulseAnim
+                    : const AlwaysStoppedAnimation(1.0),
+                child: Container(
+                  width: 170,
+                  height: 170,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: centerCircleColor,
                   ),
+                  child: Icon(centerIcon, size: 90, color: Colors.white),
                 ),
-                child: Icon(arrow, size: 90, color: Colors.white),
               ),
-            ),
-            const SizedBox(height: 22),
-            Text(
-              direction,
-              style: const TextStyle(
-                fontFamily: 'Inter',
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
+              const SizedBox(height: 22),
+              Text(
+                statusText,
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                ),
               ),
-            ),
-            const SizedBox(height: 8),
-            Column(
-              key: _distanceInfoKey,
-              children: [
-                Text(
-                  _feetLabel(_displayDistanceM ?? d.distanceUiM),
+              const SizedBox(height: 8),
+              Column(
+                key: _distanceInfoKey,
+                children: [
+                  Text(
+                    _feetLabel(_displayDistanceM ?? d.distanceUiM),
+                    style: TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      color: color,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    "RSSI: ${(_displayRssi ?? d.smoothedRssi).toStringAsFixed(1)} dBm • Seen ${_ageLabel(d.lastSeenMs)}",
+                    style: const TextStyle(fontFamily: 'Inter'),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    "UUID: …${d.shortUuid}",
+                    style: TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 14,
+                      color: Colors.grey.shade700,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Container(
+                key: _signalStrengthKey,
+                padding:
+                const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: color, width: 1.5),
+                ),
+                child: Text(
+                  _bandLabel(band),
                   style: TextStyle(
                     fontFamily: 'Inter',
-                    fontSize: 26,
+                    fontSize: 18,
                     fontWeight: FontWeight.w800,
                     color: color,
                   ),
                 ),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _markFound,
+                  icon: Icon(
+                    _manuallyFound
+                        ? Icons.check_rounded
+                        : Icons.check_circle_outline_rounded,
+                  ),
+                  label: Text(_manuallyFound ? 'Found' : 'Found it?'),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(
+                    color: Colors.grey.shade400,
+                    width: 1.6,
+                  ),
+                  color: Colors.grey.shade50,
+                ),
+                child: Padding(
+                  key: _categoryTabsKey,
+                  padding: const EdgeInsets.symmetric(horizontal: 0),
+                  child: _MarkTabs(
+                    selected: mark,
+                    onSelect: (m) => _setMark(d, m),
+                  ),
+                ),
+              ),
+              if (_manuallyFound) ...[
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _createReport,
+                    icon: Icon(
+                      _foundReport == null
+                          ? Icons.description_outlined
+                          : Icons.check_circle_outline_rounded,
+                    ),
+                    label: Text(
+                      _foundReport == null
+                          ? 'Create report'
+                          : 'Report created',
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _launchEmail,
+                        icon: const Icon(Icons.email_outlined),
+                        label: const Text('Email'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _launchSms,
+                        icon: const Icon(Icons.sms_outlined),
+                        label: const Text('SMS'),
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 8),
                 Text(
-                  "RSSI: ${d.rssi} dBm • Seen ${_ageLabel(d.lastSeenMs)}",
-                  style: const TextStyle(fontFamily: 'Inter'),
+                  'Submit feedback to the student developers.',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: 'Inter',
+                    color: Colors.grey.shade600,
+                    fontSize: 12,
+                  ),
                 ),
               ],
-            ),
-            const SizedBox(height: 8),
-            Container(
-              key: _signalStrengthKey,
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: color, width: 1.5),
-              ),
-              child: Text(
-                _bandLabel(band),
-                style: TextStyle(
-                  fontFamily: 'Inter',
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800,
-                  color: color,
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            Text(
-              'MAC: ${d.displayMac}',
-              style: const TextStyle(fontFamily: 'Inter'),
-            ),
-            const SizedBox(height: 18),
-            Padding(
-              key: _categoryTabsKey,
-              padding: const EdgeInsets.symmetric(horizontal: 18),
-              child: _MarkTabs(
-                selected: mark,
-                onSelect: (m) => _setMark(d, m),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -460,45 +572,47 @@ class _MarkTabs extends StatelessWidget {
 
   static const Color _friendly = Color(0xFF2E7D32);
   static const Color _suspect = Color(0xFFD9534F);
-  static const Color _unknown = Color(0xFF7A7A7A);
+  static const Color _undesignated = Color(0xFF7A7A7A);
+  static const Color _nonsuspect = Color(0xFF1E88E5);
 
   @override
   Widget build(BuildContext context) {
     final bg = Colors.grey.shade100;
 
     return Container(
-      height: 48,
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
         color: bg,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(24),
         border: Border.all(color: Colors.grey.shade300, width: 1),
       ),
-      child: Row(
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
         children: [
-          Expanded(
-            child: _Pill(
-              label: 'Unknown',
-              color: _unknown,
-              selected: selected == DeviceMark.unknown,
-              onTap: () => onSelect(DeviceMark.unknown),
-            ),
+          _Pill(
+            label: 'Undesignated',
+            color: _undesignated,
+            selected: selected == DeviceMark.undesignated,
+            onTap: () => onSelect(DeviceMark.undesignated),
           ),
-          Expanded(
-            child: _Pill(
-              label: 'Friendly',
-              color: _friendly,
-              selected: selected == DeviceMark.friendly,
-              onTap: () => onSelect(DeviceMark.friendly),
-            ),
+          _Pill(
+            label: 'Friendly',
+            color: _friendly,
+            selected: selected == DeviceMark.friendly,
+            onTap: () => onSelect(DeviceMark.friendly),
           ),
-          Expanded(
-            child: _Pill(
-              label: 'Suspect',
-              color: _suspect,
-              selected: selected == DeviceMark.suspect,
-              onTap: () => onSelect(DeviceMark.suspect),
-            ),
+          _Pill(
+            label: 'Nonsuspect',
+            color: _nonsuspect,
+            selected: selected == DeviceMark.nonsuspect,
+            onTap: () => onSelect(DeviceMark.nonsuspect),
+          ),
+          _Pill(
+            label: 'Suspect',
+            color: _suspect,
+            selected: selected == DeviceMark.suspect,
+            onTap: () => onSelect(DeviceMark.suspect),
           ),
         ],
       ),
@@ -544,27 +658,25 @@ class _Pill extends StatelessWidget {
       child: InkWell(
         borderRadius: BorderRadius.circular(999),
         onTap: onTap,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.signal_cellular_alt_rounded,
-              size: 18,
-              color: color,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontFamily: 'Inter',
-                fontWeight: selected ? FontWeight.w800 : FontWeight.w700,
-                fontSize: 14,
-                color: selected ? Colors.black : Colors.grey.shade700,
-                letterSpacing: 0.2,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.signal_cellular_alt_rounded, size: 18, color: color),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w700,
+                  fontSize: 14,
+                  color: selected ? Colors.black : Colors.grey.shade700,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

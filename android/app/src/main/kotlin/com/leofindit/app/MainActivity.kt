@@ -26,6 +26,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var scanActive = false
 
     private var airTagScanner: AirTagScanner? = null
     private var tileTagScanner: TileTagScanner? = null
@@ -104,6 +105,14 @@ class MainActivity : FlutterActivity() {
         super.onDestroy()
     }
 
+    private val scanRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (!scanActive) return
+            restartScanners()
+            mainHandler.postDelayed(this, 120_000L)
+        }
+    }
+
     private fun initScannersIfNeeded() {
         if (airTagScanner != null && tileTagScanner != null && samsungTagScanner != null) return
 
@@ -121,12 +130,26 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun startScanners() {
+        scanActive = true
+        mainHandler.removeCallbacks(scanRefreshRunnable)
+        airTagScanner?.start()
+        tileTagScanner?.start()
+        samsungTagScanner?.start()
+        mainHandler.postDelayed(scanRefreshRunnable, 120_000L)
+    }
+
+    private fun restartScanners() {
+        airTagScanner?.stop()
+        tileTagScanner?.stop()
+        samsungTagScanner?.stop()
         airTagScanner?.start()
         tileTagScanner?.start()
         samsungTagScanner?.start()
     }
 
     private fun stopScanners() {
+        scanActive = false
+        mainHandler.removeCallbacks(scanRefreshRunnable)
         airTagScanner?.stop()
         tileTagScanner?.stop()
         samsungTagScanner?.stop()

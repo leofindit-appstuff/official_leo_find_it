@@ -34,7 +34,7 @@ class TileTagScanner(
             ParcelUuid.fromString("0000FEE7-0000-1000-8000-00805F9B34FB")
         )
 
-        private const val TILE_STABLE_PREFIX_LEN = 6
+        private const val TILE_STABLE_PREFIX_LEN = 4
         private const val TRACKER_TTL_MS = 30_000L
     }
 

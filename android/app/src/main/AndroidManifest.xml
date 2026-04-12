@@ -23,7 +23,7 @@
         android:required="false" />
 
     <application
-        android:label="leo_find_it"
+        android:label="LeoFindIt"
         android:icon="@mipmap/leo_splash">
 
         <meta-data
